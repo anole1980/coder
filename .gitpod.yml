@@ -3,10 +3,10 @@
 # and commit this file to your remote git repository to share the goodness with others.
 
 tasks:
-  - init: install depends
-    command: sudo apt install zstd && \
-             sudo wget -o /usr/local/bin/shfmt https://github.com/mvdan/sh/releases/download/v3.0.1/shfmt_v3.0.1_linux_amd64 && \
-             sudo chmod /usr/local/bin/shfmt
+  - name: install depends
+    init: sudo apt install zstd && \
+          sudo wget -o /usr/local/bin/shfmt https://github.com/mvdan/sh/releases/download/v3.0.1/shfmt_v3.0.1_linux_amd64 && \
+          sudo chmod /usr/local/bin/shfmt
 
 
 
