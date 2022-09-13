@@ -2,11 +2,18 @@
 # Please adjust to your needs (see https://www.gitpod.io/docs/config-gitpod-file)
 # and commit this file to your remote git repository to share the goodness with others.
 
+ports:
+  - port: 7080 # coder server port
+    onOpen: open-preview
 tasks:
   - name: install depends
     init: sudo apt install zstd && \
           sudo wget -o /usr/local/bin/shfmt https://github.com/mvdan/sh/releases/download/v3.0.1/shfmt_v3.0.1_linux_amd64 && \
-          sudo chmod /usr/local/bin/shfmt
+          sudo chmod +x /usr/local/bin/shfmt
 
+  - name: build
+    command: make
 
+  - name: test
+    command: docker-compose up -d
 
