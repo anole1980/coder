@@ -163,7 +163,7 @@ func (q *fakeQuerier) GetTemplateDAUs(_ context.Context, templateID uuid.UUID) (
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 
-	counts := make(map[time.Time]map[string]struct{})
+	seens := make(map[time.Time]map[uuid.UUID]struct{})
 
 	for _, as := range q.agentStats {
 		if as.TemplateID != templateID {
@@ -171,26 +171,29 @@ func (q *fakeQuerier) GetTemplateDAUs(_ context.Context, templateID uuid.UUID) (
 		}
 
 		date := as.CreatedAt.Truncate(time.Hour * 24)
-		dateEntry := counts[date]
-		if dateEntry == nil {
-			dateEntry = make(map[string]struct{})
-		}
-		counts[date] = dateEntry
 
-		dateEntry[as.UserID.String()] = struct{}{}
+		dateEntry := seens[date]
+		if dateEntry == nil {
+			dateEntry = make(map[uuid.UUID]struct{})
+		}
+		dateEntry[as.UserID] = struct{}{}
+		seens[date] = dateEntry
 	}
 
-	countKeys := maps.Keys(counts)
-	sort.Slice(countKeys, func(i, j int) bool {
-		return countKeys[i].Before(countKeys[j])
+	seenKeys := maps.Keys(seens)
+	sort.Slice(seenKeys, func(i, j int) bool {
+		return seenKeys[i].Before(seenKeys[j])
 	})
 
 	var rs []database.GetTemplateDAUsRow
-	for _, key := range countKeys {
-		rs = append(rs, database.GetTemplateDAUsRow{
-			Date:   key,
-			Amount: int64(len(counts[key])),
-		})
+	for _, key := range seenKeys {
+		ids := seens[key]
+		for id := range ids {
+			rs = append(rs, database.GetTemplateDAUsRow{
+				Date:   key,
+				UserID: id,
+			})
+		}
 	}
 
 	return rs, nil
@@ -281,7 +284,7 @@ func (q *fakeQuerier) GetUserByEmailOrUsername(_ context.Context, arg database.G
 	defer q.mutex.RUnlock()
 
 	for _, user := range q.users {
-		if user.Email == arg.Email || user.Username == arg.Username {
+		if (user.Email == arg.Email || user.Username == arg.Username) && user.Deleted == arg.Deleted {
 			return user, nil
 		}
 	}
@@ -304,7 +307,13 @@ func (q *fakeQuerier) GetUserCount(_ context.Context) (int64, error) {
 	q.mutex.RLock()
 	defer q.mutex.RUnlock()
 
-	return int64(len(q.users)), nil
+	existing := int64(0)
+	for _, u := range q.users {
+		if !u.Deleted {
+			existing++
+		}
+	}
+	return existing, nil
 }
 
 func (q *fakeQuerier) GetActiveUserCount(_ context.Context) (int64, error) {
@@ -313,11 +322,25 @@ func (q *fakeQuerier) GetActiveUserCount(_ context.Context) (int64, error) {
 
 	active := int64(0)
 	for _, u := range q.users {
-		if u.Status == database.UserStatusActive {
+		if u.Status == database.UserStatusActive && !u.Deleted {
 			active++
 		}
 	}
 	return active, nil
+}
+
+func (q *fakeQuerier) UpdateUserDeletedByID(_ context.Context, params database.UpdateUserDeletedByIDParams) error {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
+
+	for i, u := range q.users {
+		if u.ID == params.ID {
+			u.Deleted = params.Deleted
+			q.users[i] = u
+			return nil
+		}
+	}
+	return sql.ErrNoRows
 }
 
 func (q *fakeQuerier) GetUsers(_ context.Context, params database.GetUsersParams) ([]database.User, error) {
@@ -337,6 +360,16 @@ func (q *fakeQuerier) GetUsers(_ context.Context, params database.GetUsersParams
 		}
 		return a.CreatedAt.Before(b.CreatedAt)
 	})
+
+	if params.Deleted {
+		tmp := make([]database.User, 0, len(users))
+		for _, user := range users {
+			if user.Deleted {
+				tmp = append(tmp, user)
+			}
+		}
+		users = tmp
+	}
 
 	if params.AfterID != uuid.Nil {
 		found := false
@@ -406,14 +439,17 @@ func (q *fakeQuerier) GetUsers(_ context.Context, params database.GetUsersParams
 	return users, nil
 }
 
-func (q *fakeQuerier) GetUsersByIDs(_ context.Context, ids []uuid.UUID) ([]database.User, error) {
+func (q *fakeQuerier) GetUsersByIDs(_ context.Context, params database.GetUsersByIDsParams) ([]database.User, error) {
 	q.mutex.RLock()
 	defer q.mutex.RUnlock()
 
 	users := make([]database.User, 0)
 	for _, user := range q.users {
-		for _, id := range ids {
+		for _, id := range params.IDs {
 			if user.ID.String() != id.String() {
+				continue
+			}
+			if user.Deleted != params.Deleted {
 				continue
 			}
 			users = append(users, user)
@@ -876,8 +912,8 @@ func (q *fakeQuerier) ParameterValues(_ context.Context, arg database.ParameterV
 			}
 		}
 
-		if len(arg.Ids) > 0 {
-			if !slice.Contains(arg.Ids, parameterValue.ID) {
+		if len(arg.IDs) > 0 {
+			if !slice.Contains(arg.IDs, parameterValue.ID) {
 				continue
 			}
 		}
@@ -920,7 +956,7 @@ func (q *fakeQuerier) GetTemplateByOrganizationAndName(_ context.Context, arg da
 	return database.Template{}, sql.ErrNoRows
 }
 
-func (q *fakeQuerier) UpdateTemplateMetaByID(_ context.Context, arg database.UpdateTemplateMetaByIDParams) error {
+func (q *fakeQuerier) UpdateTemplateMetaByID(_ context.Context, arg database.UpdateTemplateMetaByIDParams) (database.Template, error) {
 	q.mutex.RLock()
 	defer q.mutex.RUnlock()
 
@@ -935,10 +971,10 @@ func (q *fakeQuerier) UpdateTemplateMetaByID(_ context.Context, arg database.Upd
 		tpl.MaxTtl = arg.MaxTtl
 		tpl.MinAutostartInterval = arg.MinAutostartInterval
 		q.templates[idx] = tpl
-		return nil
+		return tpl, nil
 	}
 
-	return sql.ErrNoRows
+	return database.Template{}, sql.ErrNoRows
 }
 
 func (q *fakeQuerier) GetTemplatesWithFilter(_ context.Context, arg database.GetTemplatesWithFilterParams) ([]database.Template, error) {
@@ -958,9 +994,9 @@ func (q *fakeQuerier) GetTemplatesWithFilter(_ context.Context, arg database.Get
 			continue
 		}
 
-		if len(arg.Ids) > 0 {
+		if len(arg.IDs) > 0 {
 			match := false
-			for _, id := range arg.Ids {
+			for _, id := range arg.IDs {
 				if template.ID == id {
 					match = true
 					break
@@ -1764,6 +1800,7 @@ func (q *fakeQuerier) InsertWorkspaceResource(_ context.Context, arg database.In
 		Transition: arg.Transition,
 		Type:       arg.Type,
 		Name:       arg.Name,
+		Hide:       arg.Hide,
 	}
 	q.provisionerJobResources = append(q.provisionerJobResources, resource)
 	return resource, nil
@@ -2308,7 +2345,7 @@ func (q *fakeQuerier) GetAuditLogsOffset(ctx context.Context, arg database.GetAu
 			OrganizationID:   alog.OrganizationID,
 			Ip:               alog.Ip,
 			UserAgent:        alog.UserAgent,
-			ResourceType:     database.ResourceType(alog.UserAgent),
+			ResourceType:     alog.ResourceType,
 			ResourceID:       alog.ResourceID,
 			ResourceTarget:   alog.ResourceTarget,
 			ResourceIcon:     alog.ResourceIcon,

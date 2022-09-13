@@ -258,6 +258,8 @@ const (
 	ResourceTypeTemplateVersion ResourceType = "template_version"
 	ResourceTypeUser            ResourceType = "user"
 	ResourceTypeWorkspace       ResourceType = "workspace"
+	ResourceTypeGitSshKey       ResourceType = "git_ssh_key"
+	ResourceTypeApiKey          ResourceType = "api_key"
 )
 
 func (e *ResourceType) Scan(src interface{}) error {
@@ -504,6 +506,7 @@ type User struct {
 	RBACRoles      []string       `db:"rbac_roles" json:"rbac_roles"`
 	LoginType      LoginType      `db:"login_type" json:"login_type"`
 	AvatarURL      sql.NullString `db:"avatar_url" json:"avatar_url"`
+	Deleted        bool           `db:"deleted" json:"deleted"`
 }
 
 type UserLink struct {
@@ -584,6 +587,7 @@ type WorkspaceResource struct {
 	Transition WorkspaceTransition `db:"transition" json:"transition"`
 	Type       string              `db:"type" json:"type"`
 	Name       string              `db:"name" json:"name"`
+	Hide       bool                `db:"hide" json:"hide"`
 }
 
 type WorkspaceResourceMetadatum struct {

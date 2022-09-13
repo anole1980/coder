@@ -74,7 +74,7 @@ type querier interface {
 	GetUserLinkByLinkedID(ctx context.Context, linkedID string) (UserLink, error)
 	GetUserLinkByUserIDLoginType(ctx context.Context, arg GetUserLinkByUserIDLoginTypeParams) (UserLink, error)
 	GetUsers(ctx context.Context, arg GetUsersParams) ([]User, error)
-	GetUsersByIDs(ctx context.Context, ids []uuid.UUID) ([]User, error)
+	GetUsersByIDs(ctx context.Context, arg GetUsersByIDsParams) ([]User, error)
 	GetWorkspaceAgentByAuthToken(ctx context.Context, authToken uuid.UUID) (WorkspaceAgent, error)
 	GetWorkspaceAgentByID(ctx context.Context, id uuid.UUID) (WorkspaceAgent, error)
 	GetWorkspaceAgentByInstanceID(ctx context.Context, authInstanceID string) (WorkspaceAgent, error)
@@ -134,9 +134,10 @@ type querier interface {
 	UpdateProvisionerJobWithCompleteByID(ctx context.Context, arg UpdateProvisionerJobWithCompleteByIDParams) error
 	UpdateTemplateActiveVersionByID(ctx context.Context, arg UpdateTemplateActiveVersionByIDParams) error
 	UpdateTemplateDeletedByID(ctx context.Context, arg UpdateTemplateDeletedByIDParams) error
-	UpdateTemplateMetaByID(ctx context.Context, arg UpdateTemplateMetaByIDParams) error
+	UpdateTemplateMetaByID(ctx context.Context, arg UpdateTemplateMetaByIDParams) (Template, error)
 	UpdateTemplateVersionByID(ctx context.Context, arg UpdateTemplateVersionByIDParams) error
 	UpdateTemplateVersionDescriptionByJobID(ctx context.Context, arg UpdateTemplateVersionDescriptionByJobIDParams) error
+	UpdateUserDeletedByID(ctx context.Context, arg UpdateUserDeletedByIDParams) error
 	UpdateUserHashedPassword(ctx context.Context, arg UpdateUserHashedPasswordParams) error
 	UpdateUserLink(ctx context.Context, arg UpdateUserLinkParams) (UserLink, error)
 	UpdateUserLinkedID(ctx context.Context, arg UpdateUserLinkedIDParams) (UserLink, error)
