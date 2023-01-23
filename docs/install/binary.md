@@ -4,7 +4,7 @@ Coder publishes self-contained .zip and .tar.gz archives in [GitHub releases](ht
 
 1. Unzip the folder you just downloaded, and move the `coder` executable to a location that's on your `PATH`
 
-   ```sh
+   ```console
    # ex. macOS and Linux
    mv coder /usr/local/bin
    ```
@@ -13,11 +13,11 @@ Coder publishes self-contained .zip and .tar.gz archives in [GitHub releases](ht
 
 1. Start a Coder server
 
-   ```sh
+   ```console
    # Automatically sets up an external access URL on *.try.coder.app
-   coder server --tunnel
+   coder server
 
-   # Requires a PostgreSQL instance and external access URL
+   # Requires a PostgreSQL instance (version 13 or higher) and external access URL
    coder server --postgres-url <url> --access-url <url>
    ```
 

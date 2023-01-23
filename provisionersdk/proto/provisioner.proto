@@ -52,6 +52,34 @@ message ParameterSchema {
     string validation_condition = 11;
 }
 
+// RichParameterOption represents a singular option that a parameter may expose.
+message RichParameterOption {
+    string name = 1;
+    string description = 2;
+    string value = 3;
+    string icon = 4;
+}
+
+// RichParameter represents a variable that is exposed.
+message RichParameter {
+    string name = 1;
+    string description = 2;
+    string type = 3;
+    bool mutable = 4;
+    string default_value = 5;
+    string icon = 6;
+    repeated RichParameterOption options = 7;
+    string validation_regex = 8;
+    int32 validation_min = 9;
+    int32 validation_max = 10;
+}
+
+// RichParameterValue holds the key/value mapping of a parameter.
+message RichParameterValue {
+    string name = 1;
+    string value = 2;
+}
+
 // LogLevel represents severity of the log.
 enum LogLevel {
     TRACE = 0;
@@ -85,15 +113,37 @@ message Agent {
         string token = 9;
         string instance_id = 10;
     }
+	int32 connection_timeout_seconds = 11;
+	string troubleshooting_url = 12;
+	string motd_file = 13;
+}
+
+enum AppSharingLevel {
+    OWNER = 0;
+    AUTHENTICATED = 1;
+    PUBLIC = 2;
 }
 
 // App represents a dev-accessible application on the workspace.
 message App {
-    string name = 1;
-    string command = 2;
-    string url = 3;
-    string icon = 4;
-    bool relative_path = 5;
+    // slug is the unique identifier for the app, usually the name from the
+    // template. It must be URL-safe and hostname-safe.
+    string slug = 1;
+    string display_name = 2;
+    string command = 3;
+    string url = 4;
+    string icon = 5;
+    bool subdomain = 6;
+    Healthcheck healthcheck = 7;
+    AppSharingLevel sharing_level = 8;
+    bool external = 9;
+}
+
+// Healthcheck represents configuration for checking for app readiness.
+message Healthcheck {
+    string url = 1;
+    int32 interval = 2;
+    int32 threshold = 3;
 }
 
 // Resource represents created infrastructure.
@@ -110,6 +160,9 @@ message Resource {
     }
     repeated Metadata metadata = 4;
     bool hide = 5;
+    string icon = 6;
+    string instance_type = 7;
+    int32 daily_cost = 8;
 }
 
 // Parse consumes source-code from a directory to produce inputs.
@@ -135,6 +188,7 @@ enum WorkspaceTransition {
 }
 
 // Provision consumes source-code from a directory to produce resources.
+// Exactly one of Plan or Apply must be provided in a single session.
 message Provision {
     message Metadata {
         string coder_url = 1;
@@ -145,24 +199,40 @@ message Provision {
         string workspace_owner_id = 6;
         string workspace_owner_email = 7;
     }
-    message Start {
+
+    // Config represents execution configuration shared by both Plan and
+    // Apply commands.
+    message Config {
         string directory = 1;
-        repeated ParameterValue parameter_values = 2;
+        bytes state = 2;
         Metadata metadata = 3;
-        bytes state = 4;
-        bool dry_run = 5;
     }
+
+    message Plan {
+        Config config = 1;
+        repeated ParameterValue parameter_values = 2;
+		repeated RichParameterValue rich_parameter_values = 3;
+    }
+
+    message Apply {
+        Config config = 1;
+        bytes plan = 2;
+    }
+
     message Cancel {}
     message Request {
         oneof type {
-            Start start = 1;
-            Cancel cancel = 2;
+            Plan plan = 1;
+            Apply apply = 2;
+            Cancel cancel = 3;
         }
     }
     message Complete {
         bytes state = 1;
         string error = 2;
         repeated Resource resources = 3;
+		repeated RichParameter parameters = 4;
+		bytes plan = 5;
     }
     message Response {
         oneof type {

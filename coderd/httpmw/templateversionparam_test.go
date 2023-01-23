@@ -29,10 +29,7 @@ func TestTemplateVersionParam(t *testing.T) {
 			hashed     = sha256.Sum256([]byte(secret))
 		)
 		r := httptest.NewRequest("GET", "/", nil)
-		r.AddCookie(&http.Cookie{
-			Name:  codersdk.SessionTokenKey,
-			Value: fmt.Sprintf("%s-%s", id, secret),
-		})
+		r.Header.Set(codersdk.SessionCustomHeader, fmt.Sprintf("%s-%s", id, secret))
 
 		userID := uuid.New()
 		username, err := cryptorand.String(8)
@@ -44,6 +41,7 @@ func TestTemplateVersionParam(t *testing.T) {
 			Username:       username,
 			CreatedAt:      database.Now(),
 			UpdatedAt:      database.Now(),
+			LoginType:      database.LoginTypePassword,
 		})
 		require.NoError(t, err)
 
@@ -54,6 +52,7 @@ func TestTemplateVersionParam(t *testing.T) {
 			LastUsed:     database.Now(),
 			ExpiresAt:    database.Now().Add(time.Minute),
 			LoginType:    database.LoginTypePassword,
+			Scope:        database.APIKeyScopeAll,
 		})
 		require.NoError(t, err)
 
@@ -79,6 +78,7 @@ func TestTemplateVersionParam(t *testing.T) {
 			ID:             uuid.New(),
 			OrganizationID: organization.ID,
 			Name:           "moo",
+			Provisioner:    database.ProvisionerTypeEcho,
 		})
 		require.NoError(t, err)
 
@@ -126,7 +126,10 @@ func TestTemplateVersionParam(t *testing.T) {
 		db := databasefake.New()
 		rtr := chi.NewRouter()
 		rtr.Use(
-			httpmw.ExtractAPIKey(db, nil, false),
+			httpmw.ExtractAPIKey(httpmw.ExtractAPIKeyConfig{
+				DB:              db,
+				RedirectToLogin: false,
+			}),
 			httpmw.ExtractTemplateVersionParam(db),
 			httpmw.ExtractOrganizationParam(db),
 		)

@@ -9,7 +9,10 @@ LIMIT
 	1;
 
 -- name: GetUsersByIDs :many
-SELECT * FROM users WHERE id = ANY(@ids :: uuid [ ]) AND deleted = @deleted;
+-- This shouldn't check for deleted, because it's frequently used
+-- to look up references to actions. eg. a user could build a workspace
+-- for another user, then be deleted... we still want them to appear!
+SELECT * FROM users WHERE id = ANY(@ids :: uuid [ ]);
 
 -- name: GetUserByEmailOrUsername :one
 SELECT
@@ -17,8 +20,8 @@ SELECT
 FROM
 	users
 WHERE
-	(LOWER(username) = LOWER(@username) OR email = @email)
-	AND deleted = @deleted
+	(LOWER(username) = LOWER(@username) OR LOWER(email) = LOWER(@email)) AND
+	deleted = false
 LIMIT
 	1;
 
@@ -26,7 +29,9 @@ LIMIT
 SELECT
 	COUNT(*)
 FROM
-	users WHERE deleted = false;
+	users
+WHERE
+	deleted = false;
 
 -- name: GetActiveUserCount :one
 SELECT
@@ -34,7 +39,43 @@ SELECT
 FROM
 	users
 WHERE
-    status = 'active'::public.user_status AND deleted = false;
+    status = 'active'::user_status AND deleted = false;
+
+-- name: GetFilteredUserCount :one
+-- This will never count deleted users.
+SELECT
+	COUNT(*)
+FROM
+	users
+WHERE
+	users.deleted = false
+	-- Start filters
+	-- Filter by name, email or username
+	AND CASE
+		WHEN @search :: text != '' THEN (
+			email ILIKE concat('%', @search, '%')
+			OR username ILIKE concat('%', @search, '%')
+		)
+		ELSE true
+	END
+	-- Filter by status
+	AND CASE
+		-- @status needs to be a text because it can be empty, If it was
+		-- user_status enum, it would not.
+		WHEN cardinality(@status :: user_status[]) > 0 THEN
+			status = ANY(@status :: user_status[])
+		ELSE true
+	END
+	-- Filter by rbac_roles
+	AND CASE
+		-- @rbac_role allows filtering by rbac roles. If 'member' is included, show everyone, as everyone is a member.
+		WHEN cardinality(@rbac_role :: text[]) > 0 AND 'member' != ANY(@rbac_role :: text[])
+		THEN rbac_roles && @rbac_role :: text[]
+		ELSE true
+	END
+	-- Authorize Filter clause will be injected below in GetAuthorizedUserCount
+	-- @authorize_filter
+;
 
 -- name: InsertUser :one
 INSERT INTO
@@ -89,17 +130,18 @@ WHERE
 	id = $1;
 
 -- name: GetUsers :many
+-- This will never return deleted users.
 SELECT
-	*
+	*, COUNT(*) OVER() AS count
 FROM
 	users
 WHERE
-	users.deleted = @deleted
+	users.deleted = false
 	AND CASE
 		-- This allows using the last element on a page as effectively a cursor.
 		-- This is an important option for scripts that need to paginate without
 		-- duplicating or missing data.
-		WHEN @after_id :: uuid != '00000000-00000000-00000000-00000000' THEN (
+		WHEN @after_id :: uuid != '00000000-0000-0000-0000-000000000000'::uuid THEN (
 			-- The pagination cursor is the last ID of the previous page.
 			-- The query is ordered by the created_at field, so select all
 			-- rows after the cursor.
@@ -157,6 +199,15 @@ SET
 WHERE
 	id = $1 RETURNING *;
 
+-- name: UpdateUserLastSeenAt :one
+UPDATE
+	users
+SET
+	last_seen_at = $2,
+	updated_at = $3
+WHERE
+	id = $1 RETURNING *;
+
 
 -- name: GetAuthorizationUserRoles :one
 -- This function returns roles for authorization purposes. Implied member roles
@@ -166,15 +217,35 @@ SELECT
 	-- status is used to enforce 'suspended' users, as all roles are ignored
 	--	when suspended.
 	id, username, status,
+	-- All user roles, including their org roles.
 	array_cat(
 		-- All users are members
-			array_append(users.rbac_roles, 'member'),
-		-- All org_members get the org-member role for their orgs
-			array_append(organization_members.roles, 'organization-member:'||organization_members.organization_id::text)) :: text[]
-		AS roles
+		array_append(users.rbac_roles, 'member'),
+		(
+			SELECT
+				array_agg(org_roles)
+			FROM
+				organization_members,
+				-- All org_members get the org-member role for their orgs
+				unnest(
+					array_append(roles, 'organization-member:' || organization_members.organization_id::text)
+				) AS org_roles
+			WHERE
+				user_id = users.id
+		)
+	) :: text[] AS roles,
+	-- All groups the user is in.
+	(
+		SELECT
+			array_agg(
+				group_members.group_id :: text
+			)
+		FROM
+			group_members
+		WHERE
+			user_id = users.id
+	) :: text[] AS groups
 FROM
 	users
-LEFT JOIN organization_members
-	ON id = user_id
 WHERE
 	id = @user_id;

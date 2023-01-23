@@ -5,11 +5,10 @@ import PlayIcon from "@material-ui/icons/PlayArrowOutlined"
 import { WorkspaceBuild } from "api/typesGenerated"
 import { Pill } from "components/Pill/Pill"
 import i18next from "i18next"
-import React from "react"
+import { FC, ReactNode, PropsWithChildren } from "react"
 import { PaletteIndex } from "theme/palettes"
-import { getWorkspaceStatus } from "util/workspace"
 
-const LoadingIcon: React.FC = () => {
+const LoadingIcon: FC = () => {
   return <CircularProgress size={10} style={{ color: "#FFF" }} />
 }
 
@@ -18,21 +17,20 @@ export const getStatus = (
 ): {
   type?: PaletteIndex
   text: string
-  icon: React.ReactNode
+  icon: ReactNode
 } => {
-  const status = getWorkspaceStatus(build)
   const { t } = i18next
 
-  switch (status) {
+  switch (build.status) {
     case undefined:
       return {
         text: t("workspaceStatus.loading", { ns: "common" }),
         icon: <LoadingIcon />,
       }
-    case "started":
+    case "running":
       return {
         type: "success",
-        text: t("workspaceStatus.started", { ns: "common" }),
+        text: t("workspaceStatus.running", { ns: "common" }),
         icon: <PlayIcon />,
       }
     case "starting":
@@ -77,20 +75,19 @@ export const getStatus = (
         text: t("workspaceStatus.canceled", { ns: "common" }),
         icon: <ErrorIcon />,
       }
-    case "error":
+    case "failed":
       return {
         type: "error",
         text: t("workspaceStatus.failed", { ns: "common" }),
         icon: <ErrorIcon />,
       }
-    case "queued":
+    case "pending":
       return {
         type: "info",
-        text: t("workspaceStatus.queued", { ns: "common" }),
+        text: t("workspaceStatus.pending", { ns: "common" }),
         icon: <LoadingIcon />,
       }
   }
-  throw new Error("unknown text " + status)
 }
 
 export type WorkspaceStatusBadgeProps = {
@@ -98,10 +95,9 @@ export type WorkspaceStatusBadgeProps = {
   className?: string
 }
 
-export const WorkspaceStatusBadge: React.FC<React.PropsWithChildren<WorkspaceStatusBadgeProps>> = ({
-  build,
-  className,
-}) => {
+export const WorkspaceStatusBadge: FC<
+  PropsWithChildren<WorkspaceStatusBadgeProps>
+> = ({ build, className }) => {
   const { text, icon, type } = getStatus(build)
   return <Pill className={className} icon={icon} text={text} type={type} />
 }

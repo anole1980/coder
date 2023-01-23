@@ -1,7 +1,7 @@
 import Badge from "@material-ui/core/Badge"
 import MenuItem from "@material-ui/core/MenuItem"
 import { makeStyles } from "@material-ui/core/styles"
-import React, { useState } from "react"
+import { useState, FC, PropsWithChildren, MouseEvent } from "react"
 import { colors } from "theme/colors"
 import * as TypesGen from "../../api/typesGenerated"
 import { navHeight } from "../../theme/constants"
@@ -12,17 +12,19 @@ import { UserDropdownContent } from "../UserDropdownContent/UserDropdownContent"
 
 export interface UserDropdownProps {
   user: TypesGen.User
+  buildInfo?: TypesGen.BuildInfoResponse
   onSignOut: () => void
 }
 
-export const UserDropdown: React.FC<React.PropsWithChildren<UserDropdownProps>> = ({
+export const UserDropdown: FC<PropsWithChildren<UserDropdownProps>> = ({
+  buildInfo,
   user,
   onSignOut,
 }: UserDropdownProps) => {
   const styles = useStyles()
   const [anchorEl, setAnchorEl] = useState<HTMLElement | undefined>()
 
-  const handleDropdownClick = (ev: React.MouseEvent<HTMLLIElement>): void => {
+  const handleDropdownClick = (ev: MouseEvent<HTMLLIElement>): void => {
     setAnchorEl(ev.currentTarget)
   }
   const onPopoverClose = () => {
@@ -37,7 +39,7 @@ export const UserDropdown: React.FC<React.PropsWithChildren<UserDropdownProps>> 
         data-testid="user-dropdown-trigger"
       >
         <div className={styles.inner}>
-          <Badge overlap="circle">
+          <Badge overlap="circular">
             <UserAvatar username={user.username} avatarURL={user.avatar_url} />
           </Badge>
           {anchorEl ? (
@@ -64,7 +66,12 @@ export const UserDropdown: React.FC<React.PropsWithChildren<UserDropdownProps>> 
         variant="user-dropdown"
         onClose={onPopoverClose}
       >
-        <UserDropdownContent user={user} onPopoverClose={onPopoverClose} onSignOut={onSignOut} />
+        <UserDropdownContent
+          user={user}
+          buildInfo={buildInfo}
+          onPopoverClose={onPopoverClose}
+          onSignOut={onSignOut}
+        />
       </BorderedMenu>
     </>
   )
@@ -75,21 +82,18 @@ export const useStyles = makeStyles((theme) => ({
     marginTop: theme.spacing(1),
     marginBottom: theme.spacing(1),
   },
-
   inner: {
     display: "flex",
     alignItems: "center",
     minWidth: 0,
     maxWidth: 300,
   },
-
   menuItem: {
     height: navHeight,
-    padding: `${theme.spacing(1.5)}px 0px ${theme.spacing(1.5)}px ${theme.spacing(2.75)}px`,
+    padding: theme.spacing(1.5, 0),
 
     "&:hover": {
-      backgroundColor: theme.palette.action.hover,
-      transition: "background-color 0.3s ease",
+      backgroundColor: "transparent",
     },
   },
 }))

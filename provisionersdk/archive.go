@@ -75,15 +75,20 @@ func Tar(directory string, limit int64) ([]byte, error) {
 		if err != nil {
 			return err
 		}
-		if strings.HasPrefix(filepath.Base(rel), ".") {
+		if strings.HasPrefix(rel, ".") || strings.HasPrefix(filepath.Base(rel), ".") {
+			if fileInfo.IsDir() && rel != "." {
+				// Don't archive hidden files!
+				return filepath.SkipDir
+			}
 			// Don't archive hidden files!
-			return err
+			return nil
 		}
 		if strings.Contains(rel, ".tfstate") {
 			// Don't store tfstate!
-			return err
+			return nil
 		}
-		header.Name = rel
+		// Use unix paths in the tar archive.
+		header.Name = filepath.ToSlash(rel)
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return err
 		}
@@ -126,8 +131,11 @@ func Untar(directory string, archive []byte) error {
 		if err != nil {
 			return err
 		}
+		if header.Name == "." || strings.Contains(header.Name, "..") {
+			continue
+		}
 		// #nosec
-		target := filepath.Join(directory, header.Name)
+		target := filepath.Join(directory, filepath.FromSlash(header.Name))
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if _, err := os.Stat(target); err != nil {

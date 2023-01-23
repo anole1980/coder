@@ -1,5 +1,5 @@
 import { makeStyles } from "@material-ui/core/styles"
-import React, { useCallback, useState } from "react"
+import { useCallback, useState, FC } from "react"
 import { useCustomEvent } from "../../hooks/events"
 import { CustomEventListener } from "../../util/events"
 import { EnterpriseSnackbar } from "../EnterpriseSnackbar/EnterpriseSnackbar"
@@ -25,28 +25,41 @@ const variantFromMsgType = (type: MsgType) => {
   }
 }
 
-export const GlobalSnackbar: React.FC = () => {
+export const GlobalSnackbar: FC = () => {
   const styles = useStyles()
   const [open, setOpen] = useState<boolean>(false)
   const [notification, setNotification] = useState<NotificationMsg>()
 
-  const handleNotification = useCallback<CustomEventListener<NotificationMsg>>((event) => {
-    setNotification(event.detail)
-    setOpen(true)
-  }, [])
+  const handleNotification = useCallback<CustomEventListener<NotificationMsg>>(
+    (event) => {
+      setNotification(event.detail)
+      setOpen(true)
+    },
+    [],
+  )
 
   useCustomEvent(SnackbarEventType, handleNotification)
 
   const renderAdditionalMessage = (msg: AdditionalMessage, idx: number) => {
     if (isNotificationText(msg)) {
       return (
-        <Typography key={idx} gutterBottom variant="body2" className={styles.messageSubtitle}>
+        <Typography
+          key={idx}
+          gutterBottom
+          variant="body2"
+          className={styles.messageSubtitle}
+        >
           {msg}
         </Typography>
       )
     } else if (isNotificationTextPrefixed(msg)) {
       return (
-        <Typography key={idx} gutterBottom variant="body2" className={styles.messageSubtitle}>
+        <Typography
+          key={idx}
+          gutterBottom
+          variant="body2"
+          className={styles.messageSubtitle}
+        >
           <strong>{msg.prefix}:</strong> {msg.text}
         </Typography>
       )
@@ -77,7 +90,9 @@ export const GlobalSnackbar: React.FC = () => {
       variant={variantFromMsgType(notification.msgType)}
       message={
         <div className={styles.messageWrapper}>
-          {notification.msgType === MsgType.Error && <ErrorIcon className={styles.errorIcon} />}
+          {notification.msgType === MsgType.Error && (
+            <ErrorIcon className={styles.errorIcon} />
+          )}
           <div className={styles.message}>
             <Typography variant="body1" className={styles.messageTitle}>
               {notification.msg}

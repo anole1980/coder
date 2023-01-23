@@ -2,6 +2,7 @@ package coderd_test
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -36,16 +37,6 @@ func TestBuildInfo(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, buildinfo.ExternalURL(), buildInfo.ExternalURL, "external URL")
 	require.Equal(t, buildinfo.Version(), buildInfo.Version, "version")
-}
-
-// TestAuthorizeAllEndpoints will check `authorize` is called on every endpoint registered.
-func TestAuthorizeAllEndpoints(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-	defer cancel()
-	a := coderdtest.NewAuthTester(ctx, t, nil)
-	skipRoutes, assertRoute := coderdtest.AGPLRoutes(a)
-	a.Test(ctx, assertRoute, skipRoutes)
 }
 
 func TestDERP(t *testing.T) {
@@ -123,4 +114,96 @@ func TestDERPLatencyCheck(t *testing.T) {
 	require.NoError(t, err)
 	defer res.Body.Close()
 	require.Equal(t, http.StatusOK, res.StatusCode)
+}
+func TestHealthz(t *testing.T) {
+	t.Parallel()
+	client := coderdtest.New(t, nil)
+
+	res, err := client.Request(context.Background(), http.MethodGet, "/healthz", nil)
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	require.Equal(t, http.StatusOK, res.StatusCode)
+	body, err := io.ReadAll(res.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, "OK", string(body))
+}
+
+func TestSwagger(t *testing.T) {
+	t.Parallel()
+
+	const swaggerEndpoint = "/swagger"
+	t.Run("endpoint enabled", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, &coderdtest.Options{
+			SwaggerEndpoint: true,
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
+		defer cancel()
+
+		resp, err := requestWithRetries(ctx, t, client, http.MethodGet, swaggerEndpoint, nil)
+		require.NoError(t, err)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Contains(t, string(body), "Swagger UI")
+	})
+	t.Run("doc.json exposed", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, &coderdtest.Options{
+			SwaggerEndpoint: true,
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
+		defer cancel()
+
+		resp, err := requestWithRetries(ctx, t, client, http.MethodGet, swaggerEndpoint+"/doc.json", nil)
+		require.NoError(t, err)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Contains(t, string(body), `"swagger": "2.0"`)
+	})
+	t.Run("endpoint disabled by default", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, nil)
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
+		defer cancel()
+
+		resp, err := requestWithRetries(ctx, t, client, http.MethodGet, swaggerEndpoint, nil)
+		require.NoError(t, err)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, "<pre>\n</pre>\n", string(body))
+	})
+	t.Run("doc.json disabled by default", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, nil)
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
+		defer cancel()
+
+		resp, err := requestWithRetries(ctx, t, client, http.MethodGet, swaggerEndpoint+"/doc.json", nil)
+		require.NoError(t, err)
+
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		require.Equal(t, "<pre>\n</pre>\n", string(body))
+	})
 }

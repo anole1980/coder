@@ -16,11 +16,15 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/afero"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.11.0"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/xerrors"
 
 	"cdr.dev/slog"
-
+	"github.com/coder/coder/coderd/tracing"
 	"github.com/coder/coder/provisionerd/proto"
 	sdkproto "github.com/coder/coder/provisionersdk/proto"
 )
@@ -29,18 +33,26 @@ const (
 	MissingParameterErrorText = "missing parameter"
 )
 
+var (
+	errUpdateSkipped = xerrors.New("update skipped; job complete or failed")
+)
+
 type Runner struct {
+	tracer              trace.Tracer
+	metrics             Metrics
 	job                 *proto.AcquiredJob
 	sender              JobUpdater
+	quotaCommitter      QuotaCommitter
 	logger              slog.Logger
 	filesystem          afero.Fs
 	workDirectory       string
 	provisioner         sdkproto.DRPCProvisionerClient
 	updateInterval      time.Duration
 	forceCancelInterval time.Duration
+	logBufferInterval   time.Duration
 
 	// closed when the Runner is finished sending any updates/failed/complete.
-	done chan any
+	done chan struct{}
 	// active as long as we are not canceled
 	notCanceled context.Context
 	cancel      context.CancelFunc
@@ -51,9 +63,11 @@ type Runner struct {
 	// mutex controls access to all the following variables.
 	mutex *sync.Mutex
 	// used to wait for the failedJob or completedJob to be populated
-	cond         *sync.Cond
-	failedJob    *proto.FailedJob
-	completedJob *proto.CompletedJob
+	cond           *sync.Cond
+	flushLogsTimer *time.Timer
+	queuedLogs     []*proto.Log
+	failedJob      *proto.FailedJob
+	completedJob   *proto.CompletedJob
 	// setting this false signals that no more messages about this job should be sent.  Usually this
 	// means that a terminal message like FailedJob or CompletedJob has been sent, even in the case
 	// of a Cancel().  However, when someone calls Fail() or ForceStop(), we might not send the
@@ -61,40 +75,63 @@ type Runner struct {
 	okToSend bool
 }
 
+type Metrics struct {
+	ConcurrentJobs *prometheus.GaugeVec
+	// JobTimings also counts the total amount of jobs.
+	JobTimings *prometheus.HistogramVec
+}
+
 type JobUpdater interface {
 	UpdateJob(ctx context.Context, in *proto.UpdateJobRequest) (*proto.UpdateJobResponse, error)
 	FailJob(ctx context.Context, in *proto.FailedJob) error
 	CompleteJob(ctx context.Context, in *proto.CompletedJob) error
 }
+type QuotaCommitter interface {
+	CommitQuota(ctx context.Context, in *proto.CommitQuotaRequest) (*proto.CommitQuotaResponse, error)
+}
 
-func NewRunner(
+type Options struct {
+	Updater             JobUpdater
+	QuotaCommitter      QuotaCommitter
+	Logger              slog.Logger
+	Filesystem          afero.Fs
+	WorkDirectory       string
+	Provisioner         sdkproto.DRPCProvisionerClient
+	UpdateInterval      time.Duration
+	ForceCancelInterval time.Duration
+	LogDebounceInterval time.Duration
+	Tracer              trace.Tracer
+	Metrics             Metrics
+}
+
+func New(
+	ctx context.Context,
 	job *proto.AcquiredJob,
-	updater JobUpdater,
-	logger slog.Logger,
-	filesystem afero.Fs,
-	workDirectory string,
-	provisioner sdkproto.DRPCProvisionerClient,
-	updateInterval time.Duration,
-	forceCancelInterval time.Duration) *Runner {
+	opts Options,
+) *Runner {
 	m := new(sync.Mutex)
 
 	// we need to create our contexts here in case a call to Cancel() comes immediately.
-	logCtx := slog.With(context.Background(), slog.F("job_id", job.JobId))
-	forceStopContext, forceStopFunc := context.WithCancel(logCtx)
+	forceStopContext, forceStopFunc := context.WithCancel(ctx)
 	gracefulContext, cancelFunc := context.WithCancel(forceStopContext)
 
 	return &Runner{
+		tracer:              opts.Tracer,
+		metrics:             opts.Metrics,
 		job:                 job,
-		sender:              updater,
-		logger:              logger,
-		filesystem:          filesystem,
-		workDirectory:       workDirectory,
-		provisioner:         provisioner,
-		updateInterval:      updateInterval,
-		forceCancelInterval: forceCancelInterval,
+		sender:              opts.Updater,
+		quotaCommitter:      opts.QuotaCommitter,
+		logger:              opts.Logger.With(slog.F("job_id", job.JobId)),
+		filesystem:          opts.Filesystem,
+		workDirectory:       opts.WorkDirectory,
+		provisioner:         opts.Provisioner,
+		updateInterval:      opts.UpdateInterval,
+		forceCancelInterval: opts.ForceCancelInterval,
+		logBufferInterval:   opts.LogDebounceInterval,
+		queuedLogs:          make([]*proto.Log, 0),
 		mutex:               m,
 		cond:                sync.NewCond(m),
-		done:                make(chan any),
+		done:                make(chan struct{}),
 		okToSend:            true,
 		notStopped:          forceStopContext,
 		stop:                forceStopFunc,
@@ -103,7 +140,7 @@ func NewRunner(
 	}
 }
 
-// Run the job.
+// Run executes the job.
 //
 // the idea here is to run two goroutines to work on the job: doCleanFinish and heartbeat, then use
 // the `r.cond` to wait until the job is either complete or failed.  This function then sends the
@@ -113,12 +150,28 @@ func NewRunner(
 // that goroutine on the context passed into Fail(), and it marks okToSend false to signal us here
 // that this function should not also send a terminal message.
 func (r *Runner) Run() {
+	start := time.Now()
+	ctx, span := r.startTrace(r.notStopped, tracing.FuncName())
+	defer span.End()
+
+	concurrentGauge := r.metrics.ConcurrentJobs.WithLabelValues(r.job.Provisioner)
+	concurrentGauge.Inc()
+	defer func() {
+		status := "success"
+		if r.failedJob != nil {
+			status = "failed"
+		}
+
+		concurrentGauge.Dec()
+		r.metrics.JobTimings.WithLabelValues(r.job.Provisioner, status).Observe(time.Since(start).Seconds())
+	}()
+
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	defer r.stop()
 
-	go r.doCleanFinish()
-	go r.heartbeat()
+	go r.doCleanFinish(ctx)
+	go r.heartbeat(ctx)
 	for r.failedJob == nil && r.completedJob == nil {
 		r.cond.Wait()
 	}
@@ -127,19 +180,24 @@ func (r *Runner) Run() {
 		return
 	}
 	if r.failedJob != nil {
-		r.logger.Debug(r.notStopped, "sending FailedJob")
-		err := r.sender.FailJob(r.notStopped, r.failedJob)
+		span.RecordError(xerrors.New(r.failedJob.Error))
+		span.SetStatus(codes.Error, r.failedJob.Error)
+
+		r.logger.Debug(ctx, "sending FailedJob")
+		err := r.sender.FailJob(ctx, r.failedJob)
 		if err != nil {
-			r.logger.Error(r.notStopped, "send FailJob", slog.Error(err))
+			r.logger.Error(ctx, "send FailJob", slog.Error(err))
+		} else {
+			r.logger.Info(ctx, "sent FailedJob")
 		}
-		r.logger.Info(r.notStopped, "sent FailedJob")
 	} else {
-		r.logger.Debug(r.notStopped, "sending CompletedJob")
-		err := r.sender.CompleteJob(r.notStopped, r.completedJob)
+		r.logger.Debug(ctx, "sending CompletedJob")
+		err := r.sender.CompleteJob(ctx, r.completedJob)
 		if err != nil {
-			r.logger.Error(r.notStopped, "send CompletedJob", slog.Error(err))
+			r.logger.Error(ctx, "send CompletedJob", slog.Error(err))
+		} else {
+			r.logger.Info(ctx, "sent CompletedJob")
 		}
-		r.logger.Info(r.notStopped, "sent CompletedJob")
 	}
 	close(r.done)
 	r.okToSend = false
@@ -151,13 +209,13 @@ func (r *Runner) Cancel() {
 	r.cancel()
 }
 
-func (r *Runner) Done() <-chan any {
+func (r *Runner) Done() <-chan struct{} {
 	return r.done
 }
 
-// Fail immediately halts updates and, if the job is not complete sends FailJob to the coder server.  Running goroutines
+// Fail immediately halts updates and, if the job is not complete sends FailJob to the coder server. Running goroutines
 // are canceled but complete asynchronously (although they are prevented from further updating the job to the coder
-// server).  The provided context sets how long to keep trying to send the FailJob.
+// server). The provided context sets how long to keep trying to send the FailJob.
 func (r *Runner) Fail(ctx context.Context, f *proto.FailedJob) error {
 	f.JobId = r.job.JobId
 	r.mutex.Lock()
@@ -218,21 +276,30 @@ func (r *Runner) ForceStop() {
 }
 
 func (r *Runner) update(ctx context.Context, u *proto.UpdateJobRequest) (*proto.UpdateJobResponse, error) {
+	ctx, span := r.startTrace(ctx, tracing.FuncName())
+	defer span.End()
+
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	if !r.okToSend {
-		return nil, xerrors.New("update skipped; job complete or failed")
+		return nil, errUpdateSkipped
 	}
 	return r.sender.UpdateJob(ctx, u)
 }
 
 // doCleanFinish wraps a call to do() with cleaning up the job and setting the terminal messages
-func (r *Runner) doCleanFinish() {
-	// push the fail/succeed write onto the defer stack before the cleanup, so that cleanup happens
-	// before this.
-	var failedJob *proto.FailedJob
-	var completedJob *proto.CompletedJob
+func (r *Runner) doCleanFinish(ctx context.Context) {
+	var (
+		failedJob    *proto.FailedJob
+		completedJob *proto.CompletedJob
+	)
+
+	// push the fail/succeed write onto the defer stack before the cleanup, so
+	// that cleanup happens before this.
 	defer func() {
+		_, span := r.startTrace(ctx, tracing.FuncName())
+		defer span.End()
+
 		if failedJob != nil {
 			r.setFail(failedJob)
 			return
@@ -241,19 +308,15 @@ func (r *Runner) doCleanFinish() {
 	}()
 
 	defer func() {
-		_, err := r.update(r.notStopped, &proto.UpdateJobRequest{
-			JobId: r.job.JobId,
-			Logs: []*proto.Log{{
-				Source:    proto.LogSource_PROVISIONER_DAEMON,
-				Level:     sdkproto.LogLevel_INFO,
-				Stage:     "Cleaning Up",
-				CreatedAt: time.Now().UTC().UnixMilli(),
-			}},
+		ctx, span := r.startTrace(ctx, tracing.FuncName())
+		defer span.End()
+
+		r.queueLog(ctx, &proto.Log{
+			Source:    proto.LogSource_PROVISIONER_DAEMON,
+			Level:     sdkproto.LogLevel_INFO,
+			Stage:     "Cleaning Up",
+			CreatedAt: time.Now().UnixMilli(),
 		})
-		if err != nil {
-			r.logger.Warn(r.notStopped, "failed to log cleanup")
-			return
-		}
 
 		// Cleanup the work directory after execution.
 		for attempt := 0; attempt < 5; attempt++ {
@@ -263,47 +326,51 @@ func (r *Runner) doCleanFinish() {
 				// When the provisioner daemon is shutting down,
 				// it may take a few milliseconds for processes to exit.
 				// See: https://github.com/golang/go/issues/50510
-				r.logger.Debug(r.notStopped, "failed to clean work directory; trying again", slog.Error(err))
+				r.logger.Debug(ctx, "failed to clean work directory; trying again", slog.Error(err))
 				time.Sleep(250 * time.Millisecond)
 				continue
 			}
-			r.logger.Debug(r.notStopped, "cleaned up work directory", slog.Error(err))
+			r.logger.Debug(ctx, "cleaned up work directory")
 			break
 		}
+
+		r.flushQueuedLogs(ctx)
 	}()
 
-	completedJob, failedJob = r.do()
+	completedJob, failedJob = r.do(ctx)
 }
 
 // do actually does the work of running the job
-func (r *Runner) do() (*proto.CompletedJob, *proto.FailedJob) {
+func (r *Runner) do(ctx context.Context) (*proto.CompletedJob, *proto.FailedJob) {
+	ctx, span := r.startTrace(ctx, tracing.FuncName())
+	defer span.End()
+
 	err := r.filesystem.MkdirAll(r.workDirectory, 0700)
 	if err != nil {
 		return nil, r.failedJobf("create work directory %q: %s", r.workDirectory, err)
 	}
 
-	_, err = r.update(r.notStopped, &proto.UpdateJobRequest{
-		JobId: r.job.JobId,
-		Logs: []*proto.Log{{
-			Source:    proto.LogSource_PROVISIONER_DAEMON,
-			Level:     sdkproto.LogLevel_INFO,
-			Stage:     "Setting up",
-			CreatedAt: time.Now().UTC().UnixMilli(),
-		}},
+	r.queueLog(ctx, &proto.Log{
+		Source:    proto.LogSource_PROVISIONER_DAEMON,
+		Level:     sdkproto.LogLevel_INFO,
+		Stage:     "Setting up",
+		CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		return nil, r.failedJobf("write log: %s", err)
 	}
 
-	r.logger.Info(r.notStopped, "unpacking template source archive",
-		slog.F("size_bytes", len(r.job.TemplateSourceArchive)))
+	r.logger.Info(ctx, "unpacking template source archive",
+		slog.F("size_bytes", len(r.job.TemplateSourceArchive)),
+	)
+
 	reader := tar.NewReader(bytes.NewBuffer(r.job.TemplateSourceArchive))
 	for {
 		header, err := reader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
 			return nil, r.failedJobf("read template source archive: %s", err)
 		}
 		// #nosec
@@ -347,29 +414,30 @@ func (r *Runner) do() (*proto.CompletedJob, *proto.FailedJob) {
 			)
 		}
 	}
-
 	switch jobType := r.job.Type.(type) {
 	case *proto.AcquiredJob_TemplateImport_:
 		r.logger.Debug(context.Background(), "acquired job is template import")
 
-		failedJob := r.runReadmeParse()
+		failedJob := r.runReadmeParse(ctx)
 		if failedJob != nil {
 			return nil, failedJob
 		}
-		return r.runTemplateImport()
+		return r.runTemplateImport(ctx)
 	case *proto.AcquiredJob_TemplateDryRun_:
 		r.logger.Debug(context.Background(), "acquired job is template dry-run",
 			slog.F("workspace_name", jobType.TemplateDryRun.Metadata.WorkspaceName),
 			slog.F("parameters", jobType.TemplateDryRun.ParameterValues),
+			slog.F("rich_parameter_values", jobType.TemplateDryRun.RichParameterValues),
 		)
-		return r.runTemplateDryRun()
+		return r.runTemplateDryRun(ctx)
 	case *proto.AcquiredJob_WorkspaceBuild_:
 		r.logger.Debug(context.Background(), "acquired job is workspace provision",
 			slog.F("workspace_name", jobType.WorkspaceBuild.WorkspaceName),
 			slog.F("state_length", len(jobType.WorkspaceBuild.State)),
 			slog.F("parameters", jobType.WorkspaceBuild.ParameterValues),
+			slog.F("rich_parameter_values", jobType.WorkspaceBuild.RichParameterValues),
 		)
-		return r.runWorkspaceBuild()
+		return r.runWorkspaceBuild(ctx)
 	default:
 		return nil, r.failedJobf("unknown job type %q; ensure your provisioner daemon is up-to-date",
 			reflect.TypeOf(r.job.Type).String())
@@ -378,9 +446,10 @@ func (r *Runner) do() (*proto.CompletedJob, *proto.FailedJob) {
 
 // heartbeat periodically sends updates on the job, which keeps coder server from assuming the job
 // is stalled, and allows the runner to learn if the job has been canceled by the user.
-func (r *Runner) heartbeat() {
+func (r *Runner) heartbeat(ctx context.Context) {
 	ticker := time.NewTicker(r.updateInterval)
 	defer ticker.Stop()
+
 	for {
 		select {
 		case <-r.notCanceled.Done():
@@ -388,29 +457,29 @@ func (r *Runner) heartbeat() {
 		case <-ticker.C:
 		}
 
-		resp, err := r.update(r.notStopped, &proto.UpdateJobRequest{
+		resp, err := r.update(ctx, &proto.UpdateJobRequest{
 			JobId: r.job.JobId,
 		})
 		if err != nil {
-			err = r.Fail(r.notStopped, r.failedJobf("send periodic update: %s", err))
+			err = r.Fail(ctx, r.failedJobf("send periodic update: %s", err))
 			if err != nil {
-				r.logger.Error(r.notStopped, "failed to call FailJob", slog.Error(err))
+				r.logger.Error(ctx, "failed to call FailJob", slog.Error(err))
 			}
 			return
 		}
 		if !resp.Canceled {
 			continue
 		}
-		r.logger.Info(r.notStopped, "attempting graceful cancelation")
+		r.logger.Info(ctx, "attempting graceful cancelation")
 		r.Cancel()
 		// Hard-cancel the job after a minute of pending cancelation.
 		timer := time.NewTimer(r.forceCancelInterval)
 		select {
 		case <-timer.C:
-			r.logger.Warn(r.notStopped, "Cancel timed out")
-			err := r.Fail(r.notStopped, r.failedJobf("Cancel timed out"))
+			r.logger.Warn(ctx, "Cancel timed out")
+			err := r.Fail(ctx, r.failedJobf("Cancel timed out"))
 			if err != nil {
-				r.logger.Warn(r.notStopped, "failed to call FailJob", slog.Error(err))
+				r.logger.Warn(ctx, "failed to call FailJob", slog.Error(err))
 			}
 			return
 		case <-r.Done():
@@ -427,32 +496,28 @@ func (r *Runner) heartbeat() {
 // versions.
 const ReadmeFile = "README.md"
 
-func (r *Runner) runReadmeParse() *proto.FailedJob {
+func (r *Runner) runReadmeParse(ctx context.Context) *proto.FailedJob {
+	ctx, span := r.startTrace(ctx, tracing.FuncName())
+	defer span.End()
+
 	fi, err := afero.ReadFile(r.filesystem, path.Join(r.workDirectory, ReadmeFile))
 	if err != nil {
-		_, err := r.update(r.notStopped, &proto.UpdateJobRequest{
-			JobId: r.job.JobId,
-			Logs: []*proto.Log{{
-				Source:    proto.LogSource_PROVISIONER_DAEMON,
-				Level:     sdkproto.LogLevel_DEBUG,
-				Stage:     "No README.md provided",
-				CreatedAt: time.Now().UTC().UnixMilli(),
-			}},
+		r.queueLog(ctx, &proto.Log{
+			Source:    proto.LogSource_PROVISIONER_DAEMON,
+			Level:     sdkproto.LogLevel_DEBUG,
+			Stage:     "No README.md provided",
+			CreatedAt: time.Now().UnixMilli(),
 		})
-		if err != nil {
-			return r.failedJobf("write log: %s", err)
-		}
-
 		return nil
 	}
 
-	_, err = r.update(r.notStopped, &proto.UpdateJobRequest{
+	_, err = r.update(ctx, &proto.UpdateJobRequest{
 		JobId: r.job.JobId,
 		Logs: []*proto.Log{{
 			Source:    proto.LogSource_PROVISIONER_DAEMON,
 			Level:     sdkproto.LogLevel_INFO,
 			Stage:     "Adding README.md...",
-			CreatedAt: time.Now().UTC().UnixMilli(),
+			CreatedAt: time.Now().UnixMilli(),
 		}},
 		Readme: fi,
 	})
@@ -462,25 +527,22 @@ func (r *Runner) runReadmeParse() *proto.FailedJob {
 	return nil
 }
 
-func (r *Runner) runTemplateImport() (*proto.CompletedJob, *proto.FailedJob) {
+func (r *Runner) runTemplateImport(ctx context.Context) (*proto.CompletedJob, *proto.FailedJob) {
+	ctx, span := r.startTrace(ctx, tracing.FuncName())
+	defer span.End()
+
 	// Parse parameters and update the job with the parameter specs
-	_, err := r.update(r.notStopped, &proto.UpdateJobRequest{
-		JobId: r.job.JobId,
-		Logs: []*proto.Log{{
-			Source:    proto.LogSource_PROVISIONER_DAEMON,
-			Level:     sdkproto.LogLevel_INFO,
-			Stage:     "Parsing template parameters",
-			CreatedAt: time.Now().UTC().UnixMilli(),
-		}},
+	r.queueLog(ctx, &proto.Log{
+		Source:    proto.LogSource_PROVISIONER_DAEMON,
+		Level:     sdkproto.LogLevel_INFO,
+		Stage:     "Parsing template parameters",
+		CreatedAt: time.Now().UnixMilli(),
 	})
-	if err != nil {
-		return nil, r.failedJobf("write log: %s", err)
-	}
-	parameterSchemas, err := r.runTemplateImportParse()
+	parameterSchemas, err := r.runTemplateImportParse(ctx)
 	if err != nil {
 		return nil, r.failedJobf("run parse: %s", err)
 	}
-	updateResponse, err := r.update(r.notStopped, &proto.UpdateJobRequest{
+	updateResponse, err := r.update(ctx, &proto.UpdateJobRequest{
 		JobId:            r.job.JobId,
 		ParameterSchemas: parameterSchemas,
 	})
@@ -500,19 +562,13 @@ func (r *Runner) runTemplateImport() (*proto.CompletedJob, *proto.FailedJob) {
 	}
 
 	// Determine persistent resources
-	_, err = r.update(r.notStopped, &proto.UpdateJobRequest{
-		JobId: r.job.JobId,
-		Logs: []*proto.Log{{
-			Source:    proto.LogSource_PROVISIONER_DAEMON,
-			Level:     sdkproto.LogLevel_INFO,
-			Stage:     "Detecting persistent resources",
-			CreatedAt: time.Now().UTC().UnixMilli(),
-		}},
+	r.queueLog(ctx, &proto.Log{
+		Source:    proto.LogSource_PROVISIONER_DAEMON,
+		Level:     sdkproto.LogLevel_INFO,
+		Stage:     "Detecting persistent resources",
+		CreatedAt: time.Now().UnixMilli(),
 	})
-	if err != nil {
-		return nil, r.failedJobf("write log: %s", err)
-	}
-	startResources, err := r.runTemplateImportProvision(updateResponse.ParameterValues, &sdkproto.Provision_Metadata{
+	startResources, parameters, err := r.runTemplateImportProvision(ctx, updateResponse.ParameterValues, &sdkproto.Provision_Metadata{
 		CoderUrl:            r.job.GetTemplateImport().Metadata.CoderUrl,
 		WorkspaceTransition: sdkproto.WorkspaceTransition_START,
 	})
@@ -521,19 +577,13 @@ func (r *Runner) runTemplateImport() (*proto.CompletedJob, *proto.FailedJob) {
 	}
 
 	// Determine ephemeral resources.
-	_, err = r.update(r.notStopped, &proto.UpdateJobRequest{
-		JobId: r.job.JobId,
-		Logs: []*proto.Log{{
-			Source:    proto.LogSource_PROVISIONER_DAEMON,
-			Level:     sdkproto.LogLevel_INFO,
-			Stage:     "Detecting ephemeral resources",
-			CreatedAt: time.Now().UTC().UnixMilli(),
-		}},
+	r.queueLog(ctx, &proto.Log{
+		Source:    proto.LogSource_PROVISIONER_DAEMON,
+		Level:     sdkproto.LogLevel_INFO,
+		Stage:     "Detecting ephemeral resources",
+		CreatedAt: time.Now().UnixMilli(),
 	})
-	if err != nil {
-		return nil, r.failedJobf("write log: %s", err)
-	}
-	stopResources, err := r.runTemplateImportProvision(updateResponse.ParameterValues, &sdkproto.Provision_Metadata{
+	stopResources, _, err := r.runTemplateImportProvision(ctx, updateResponse.ParameterValues, &sdkproto.Provision_Metadata{
 		CoderUrl:            r.job.GetTemplateImport().Metadata.CoderUrl,
 		WorkspaceTransition: sdkproto.WorkspaceTransition_STOP,
 	})
@@ -547,14 +597,18 @@ func (r *Runner) runTemplateImport() (*proto.CompletedJob, *proto.FailedJob) {
 			TemplateImport: &proto.CompletedJob_TemplateImport{
 				StartResources: startResources,
 				StopResources:  stopResources,
+				RichParameters: parameters,
 			},
 		},
 	}, nil
 }
 
 // Parses parameter schemas from source.
-func (r *Runner) runTemplateImportParse() ([]*sdkproto.ParameterSchema, error) {
-	stream, err := r.provisioner.Parse(r.notStopped, &sdkproto.Parse_Request{
+func (r *Runner) runTemplateImportParse(ctx context.Context) ([]*sdkproto.ParameterSchema, error) {
+	ctx, span := r.startTrace(ctx, tracing.FuncName())
+	defer span.End()
+
+	stream, err := r.provisioner.Parse(ctx, &sdkproto.Parse_Request{
 		Directory: r.workDirectory,
 	})
 	if err != nil {
@@ -573,19 +627,13 @@ func (r *Runner) runTemplateImportParse() ([]*sdkproto.ParameterSchema, error) {
 				slog.F("output", msgType.Log.Output),
 			)
 
-			_, err = r.update(r.notStopped, &proto.UpdateJobRequest{
-				JobId: r.job.JobId,
-				Logs: []*proto.Log{{
-					Source:    proto.LogSource_PROVISIONER,
-					Level:     msgType.Log.Level,
-					CreatedAt: time.Now().UTC().UnixMilli(),
-					Output:    msgType.Log.Output,
-					Stage:     "Parse parameters",
-				}},
+			r.queueLog(ctx, &proto.Log{
+				Source:    proto.LogSource_PROVISIONER,
+				Level:     msgType.Log.Level,
+				CreatedAt: time.Now().UnixMilli(),
+				Output:    msgType.Log.Output,
+				Stage:     "Parse parameters",
 			})
-			if err != nil {
-				return nil, xerrors.Errorf("update job: %w", err)
-			}
 		case *sdkproto.Parse_Response_Complete:
 			r.logger.Info(context.Background(), "parse complete",
 				slog.F("parameter_schemas", msgType.Complete.ParameterSchemas))
@@ -599,9 +647,18 @@ func (r *Runner) runTemplateImportParse() ([]*sdkproto.ParameterSchema, error) {
 }
 
 // Performs a dry-run provision when importing a template.
-// This is used to detect resources that would be provisioned
-// for a workspace in various states.
-func (r *Runner) runTemplateImportProvision(values []*sdkproto.ParameterValue, metadata *sdkproto.Provision_Metadata) ([]*sdkproto.Resource, error) {
+// This is used to detect resources that would be provisioned for a workspace in various states.
+// It doesn't define values for rich parameters as they're unknown during template import.
+func (r *Runner) runTemplateImportProvision(ctx context.Context, values []*sdkproto.ParameterValue, metadata *sdkproto.Provision_Metadata) ([]*sdkproto.Resource, []*sdkproto.RichParameter, error) {
+	return r.runTemplateImportProvisionWithRichParameters(ctx, values, nil, metadata)
+}
+
+// Performs a dry-run provision with provided rich parameters.
+// This is used to detect resources that would be provisioned for a workspace in various states.
+func (r *Runner) runTemplateImportProvisionWithRichParameters(ctx context.Context, values []*sdkproto.ParameterValue, richParameterValues []*sdkproto.RichParameterValue, metadata *sdkproto.Provision_Metadata) ([]*sdkproto.Resource, []*sdkproto.RichParameter, error) {
+	ctx, span := r.startTrace(ctx, tracing.FuncName())
+	defer span.End()
+
 	var stage string
 	switch metadata.WorkspaceTransition {
 	case sdkproto.WorkspaceTransition_START:
@@ -611,9 +668,9 @@ func (r *Runner) runTemplateImportProvision(values []*sdkproto.ParameterValue, m
 	}
 	// use the notStopped so that if we attempt to gracefully cancel, the stream will still be available for us
 	// to send the cancel to the provisioner
-	stream, err := r.provisioner.Provision(r.notStopped)
+	stream, err := r.provisioner.Provision(ctx)
 	if err != nil {
-		return nil, xerrors.Errorf("provision: %w", err)
+		return nil, nil, xerrors.Errorf("provision: %w", err)
 	}
 	defer stream.Close()
 	go func() {
@@ -629,23 +686,25 @@ func (r *Runner) runTemplateImportProvision(values []*sdkproto.ParameterValue, m
 		}
 	}()
 	err = stream.Send(&sdkproto.Provision_Request{
-		Type: &sdkproto.Provision_Request_Start{
-			Start: &sdkproto.Provision_Start{
-				Directory:       r.workDirectory,
-				ParameterValues: values,
-				DryRun:          true,
-				Metadata:        metadata,
+		Type: &sdkproto.Provision_Request_Plan{
+			Plan: &sdkproto.Provision_Plan{
+				Config: &sdkproto.Provision_Config{
+					Directory: r.workDirectory,
+					Metadata:  metadata,
+				},
+				ParameterValues:     values,
+				RichParameterValues: richParameterValues,
 			},
 		},
 	})
 	if err != nil {
-		return nil, xerrors.Errorf("start provision: %w", err)
+		return nil, nil, xerrors.Errorf("start provision: %w", err)
 	}
 
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			return nil, xerrors.Errorf("recv import provision: %w", err)
+			return nil, nil, xerrors.Errorf("recv import provision: %w", err)
 		}
 		switch msgType := msg.Type.(type) {
 		case *sdkproto.Provision_Response_Log:
@@ -653,26 +712,20 @@ func (r *Runner) runTemplateImportProvision(values []*sdkproto.ParameterValue, m
 				slog.F("level", msgType.Log.Level),
 				slog.F("output", msgType.Log.Output),
 			)
-			_, err = r.update(r.notStopped, &proto.UpdateJobRequest{
-				JobId: r.job.JobId,
-				Logs: []*proto.Log{{
-					Source:    proto.LogSource_PROVISIONER,
-					Level:     msgType.Log.Level,
-					CreatedAt: time.Now().UTC().UnixMilli(),
-					Output:    msgType.Log.Output,
-					Stage:     stage,
-				}},
+			r.queueLog(ctx, &proto.Log{
+				Source:    proto.LogSource_PROVISIONER,
+				Level:     msgType.Log.Level,
+				CreatedAt: time.Now().UnixMilli(),
+				Output:    msgType.Log.Output,
+				Stage:     stage,
 			})
-			if err != nil {
-				return nil, xerrors.Errorf("send job update: %w", err)
-			}
 		case *sdkproto.Provision_Response_Complete:
 			if msgType.Complete.Error != "" {
 				r.logger.Info(context.Background(), "dry-run provision failure",
 					slog.F("error", msgType.Complete.Error),
 				)
 
-				return nil, xerrors.New(msgType.Complete.Error)
+				return nil, nil, xerrors.New(msgType.Complete.Error)
 			}
 
 			r.logger.Info(context.Background(), "parse dry-run provision successful",
@@ -681,16 +734,18 @@ func (r *Runner) runTemplateImportProvision(values []*sdkproto.ParameterValue, m
 				slog.F("state_length", len(msgType.Complete.State)),
 			)
 
-			return msgType.Complete.Resources, nil
+			return msgType.Complete.Resources, msgType.Complete.Parameters, nil
 		default:
-			return nil, xerrors.Errorf("invalid message type %q received from provisioner",
+			return nil, nil, xerrors.Errorf("invalid message type %q received from provisioner",
 				reflect.TypeOf(msg.Type).String())
 		}
 	}
 }
 
-func (r *Runner) runTemplateDryRun() (
-	*proto.CompletedJob, *proto.FailedJob) {
+func (r *Runner) runTemplateDryRun(ctx context.Context) (*proto.CompletedJob, *proto.FailedJob) {
+	ctx, span := r.startTrace(ctx, tracing.FuncName())
+	defer span.End()
+
 	// Ensure all metadata fields are set as they are all optional for dry-run.
 	metadata := r.job.GetTemplateDryRun().GetMetadata()
 	metadata.WorkspaceTransition = sdkproto.WorkspaceTransition_START
@@ -720,8 +775,9 @@ func (r *Runner) runTemplateDryRun() (
 	}
 
 	// Run the template import provision task since it's already a dry run.
-	resources, err := r.runTemplateImportProvision(
+	resources, _, err := r.runTemplateImportProvisionWithRichParameters(ctx,
 		r.job.GetTemplateDryRun().GetParameterValues(),
+		r.job.GetTemplateDryRun().GetRichParameterValues(),
 		metadata,
 	)
 	if err != nil {
@@ -738,34 +794,12 @@ func (r *Runner) runTemplateDryRun() (
 	}, nil
 }
 
-func (r *Runner) runWorkspaceBuild() (
-	*proto.CompletedJob, *proto.FailedJob) {
-	var stage string
-	switch r.job.GetWorkspaceBuild().Metadata.WorkspaceTransition {
-	case sdkproto.WorkspaceTransition_START:
-		stage = "Starting workspace"
-	case sdkproto.WorkspaceTransition_STOP:
-		stage = "Stopping workspace"
-	case sdkproto.WorkspaceTransition_DESTROY:
-		stage = "Destroying workspace"
-	}
-
-	_, err := r.update(r.notStopped, &proto.UpdateJobRequest{
-		JobId: r.job.JobId,
-		Logs: []*proto.Log{{
-			Source:    proto.LogSource_PROVISIONER_DAEMON,
-			Level:     sdkproto.LogLevel_INFO,
-			Stage:     stage,
-			CreatedAt: time.Now().UTC().UnixMilli(),
-		}},
-	})
-	if err != nil {
-		return nil, r.failedJobf("write log: %s", err)
-	}
-
-	// use the notStopped so that if we attempt to gracefully cancel, the stream will still be available for us
-	// to send the cancel to the provisioner
-	stream, err := r.provisioner.Provision(r.notStopped)
+func (r *Runner) buildWorkspace(ctx context.Context, stage string, req *sdkproto.Provision_Request) (
+	*sdkproto.Provision_Complete, *proto.FailedJob,
+) {
+	// use the notStopped so that if we attempt to gracefully cancel, the stream
+	// will still be available for us to send the cancel to the provisioner
+	stream, err := r.provisioner.Provision(ctx)
 	if err != nil {
 		return nil, r.failedJobf("provision: %s", err)
 	}
@@ -782,16 +816,8 @@ func (r *Runner) runWorkspaceBuild() (
 			})
 		}
 	}()
-	err = stream.Send(&sdkproto.Provision_Request{
-		Type: &sdkproto.Provision_Request_Start{
-			Start: &sdkproto.Provision_Start{
-				Directory:       r.workDirectory,
-				ParameterValues: r.job.GetWorkspaceBuild().ParameterValues,
-				Metadata:        r.job.GetWorkspaceBuild().Metadata,
-				State:           r.job.GetWorkspaceBuild().State,
-			},
-		},
-	})
+
+	err = stream.Send(req)
 	if err != nil {
 		return nil, r.failedJobf("start provision: %s", err)
 	}
@@ -809,19 +835,13 @@ func (r *Runner) runWorkspaceBuild() (
 				slog.F("workspace_build_id", r.job.GetWorkspaceBuild().WorkspaceBuildId),
 			)
 
-			_, err = r.update(r.notStopped, &proto.UpdateJobRequest{
-				JobId: r.job.JobId,
-				Logs: []*proto.Log{{
-					Source:    proto.LogSource_PROVISIONER,
-					Level:     msgType.Log.Level,
-					CreatedAt: time.Now().UTC().UnixMilli(),
-					Output:    msgType.Log.Output,
-					Stage:     stage,
-				}},
+			r.queueLog(ctx, &proto.Log{
+				Source:    proto.LogSource_PROVISIONER,
+				Level:     msgType.Log.Level,
+				CreatedAt: time.Now().UnixMilli(),
+				Output:    msgType.Log.Output,
+				Stage:     stage,
 			})
-			if err != nil {
-				return nil, r.failedJobf("send job update: %s", err)
-			}
 		case *sdkproto.Provision_Response_Complete:
 			if msgType.Complete.Error != "" {
 				r.logger.Info(context.Background(), "provision failed; updating state",
@@ -840,30 +860,196 @@ func (r *Runner) runWorkspaceBuild() (
 			}
 
 			r.logger.Debug(context.Background(), "provision complete no error")
-			r.logger.Info(context.Background(), "provision successful; marked job as complete",
+			r.logger.Info(context.Background(), "provision successful",
 				slog.F("resource_count", len(msgType.Complete.Resources)),
 				slog.F("resources", msgType.Complete.Resources),
 				slog.F("state_length", len(msgType.Complete.State)),
 			)
 			// Stop looping!
-			return &proto.CompletedJob{
-				JobId: r.job.JobId,
-				Type: &proto.CompletedJob_WorkspaceBuild_{
-					WorkspaceBuild: &proto.CompletedJob_WorkspaceBuild{
-						State:     msgType.Complete.State,
-						Resources: msgType.Complete.Resources,
-					},
-				},
-			}, nil
+			return msgType.Complete, nil
 		default:
 			return nil, r.failedJobf("invalid message type %T received from provisioner", msg.Type)
 		}
 	}
 }
 
+func (r *Runner) commitQuota(ctx context.Context, resources []*sdkproto.Resource) *proto.FailedJob {
+	cost := sumDailyCost(resources)
+	if cost == 0 {
+		return nil
+	}
+
+	const stage = "Commit quota"
+
+	resp, err := r.quotaCommitter.CommitQuota(ctx, &proto.CommitQuotaRequest{
+		JobId:     r.job.JobId,
+		DailyCost: int32(cost),
+	})
+	if err != nil {
+		r.queueLog(ctx, &proto.Log{
+			Source:    proto.LogSource_PROVISIONER,
+			Level:     sdkproto.LogLevel_ERROR,
+			CreatedAt: time.Now().UnixMilli(),
+			Output:    fmt.Sprintf("Failed to commit quota: %+v", err),
+			Stage:     stage,
+		})
+		return r.failedJobf("commit quota: %+v", err)
+	}
+	for _, line := range []string{
+		fmt.Sprintf("Build cost       —   %v", cost),
+		fmt.Sprintf("Budget           —   %v", resp.Budget),
+		fmt.Sprintf("Credits consumed —   %v", resp.CreditsConsumed),
+	} {
+		r.queueLog(ctx, &proto.Log{
+			Source:    proto.LogSource_PROVISIONER,
+			Level:     sdkproto.LogLevel_INFO,
+			CreatedAt: time.Now().UnixMilli(),
+			Output:    line,
+			Stage:     stage,
+		})
+	}
+
+	if !resp.Ok {
+		r.queueLog(ctx, &proto.Log{
+			Source:    proto.LogSource_PROVISIONER,
+			Level:     sdkproto.LogLevel_WARN,
+			CreatedAt: time.Now().UnixMilli(),
+			Output:    "This build would exceed your quota. Failing.",
+			Stage:     stage,
+		})
+		return r.failedJobf("insufficient quota")
+	}
+	return nil
+}
+
+func (r *Runner) runWorkspaceBuild(ctx context.Context) (*proto.CompletedJob, *proto.FailedJob) {
+	ctx, span := r.startTrace(ctx, tracing.FuncName())
+	defer span.End()
+
+	var (
+		applyStage  string
+		commitQuota bool
+	)
+	switch r.job.GetWorkspaceBuild().Metadata.WorkspaceTransition {
+	case sdkproto.WorkspaceTransition_START:
+		applyStage = "Starting workspace"
+		commitQuota = true
+	case sdkproto.WorkspaceTransition_STOP:
+		applyStage = "Stopping workspace"
+		commitQuota = true
+	case sdkproto.WorkspaceTransition_DESTROY:
+		applyStage = "Destroying workspace"
+	}
+
+	config := &sdkproto.Provision_Config{
+		Directory: r.workDirectory,
+		Metadata:  r.job.GetWorkspaceBuild().Metadata,
+		State:     r.job.GetWorkspaceBuild().State,
+	}
+
+	completedPlan, failed := r.buildWorkspace(ctx, "Planning infrastructure", &sdkproto.Provision_Request{
+		Type: &sdkproto.Provision_Request_Plan{
+			Plan: &sdkproto.Provision_Plan{
+				Config:              config,
+				ParameterValues:     r.job.GetWorkspaceBuild().ParameterValues,
+				RichParameterValues: r.job.GetWorkspaceBuild().RichParameterValues,
+			},
+		},
+	})
+	if failed != nil {
+		return nil, failed
+	}
+	r.flushQueuedLogs(ctx)
+	if commitQuota {
+		failed = r.commitQuota(ctx, completedPlan.GetResources())
+		r.flushQueuedLogs(ctx)
+		if failed != nil {
+			return nil, failed
+		}
+	}
+
+	r.queueLog(ctx, &proto.Log{
+		Source:    proto.LogSource_PROVISIONER_DAEMON,
+		Level:     sdkproto.LogLevel_INFO,
+		Stage:     applyStage,
+		CreatedAt: time.Now().UnixMilli(),
+	})
+
+	completedApply, failed := r.buildWorkspace(ctx, applyStage, &sdkproto.Provision_Request{
+		Type: &sdkproto.Provision_Request_Apply{
+			Apply: &sdkproto.Provision_Apply{
+				Config: config,
+				Plan:   completedPlan.GetPlan(),
+			},
+		},
+	})
+	if failed != nil {
+		return nil, failed
+	}
+	r.flushQueuedLogs(ctx)
+
+	return &proto.CompletedJob{
+		JobId: r.job.JobId,
+		Type: &proto.CompletedJob_WorkspaceBuild_{
+			WorkspaceBuild: &proto.CompletedJob_WorkspaceBuild{
+				State:     completedApply.GetState(),
+				Resources: completedApply.GetResources(),
+			},
+		},
+	}, nil
+}
+
 func (r *Runner) failedJobf(format string, args ...interface{}) *proto.FailedJob {
 	return &proto.FailedJob{
 		JobId: r.job.JobId,
 		Error: fmt.Sprintf(format, args...),
+	}
+}
+
+func (r *Runner) startTrace(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+	return r.tracer.Start(ctx, name, append(opts, trace.WithAttributes(
+		semconv.ServiceNameKey.String("coderd.provisionerd"),
+	))...)
+}
+
+// queueLog adds a log to the buffer and debounces a timer
+// if one exists to flush the logs. It stores a maximum of
+// 100 log lines before flushing as a safe-guard mechanism.
+func (r *Runner) queueLog(ctx context.Context, log *proto.Log) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.queuedLogs = append(r.queuedLogs, log)
+	if r.flushLogsTimer != nil {
+		r.flushLogsTimer.Reset(r.logBufferInterval)
+		return
+	}
+	// This can be configurable if there are a ton of logs.
+	if len(r.queuedLogs) > 100 {
+		// Flushing logs requires a lock, so this can happen async.
+		go r.flushQueuedLogs(ctx)
+		return
+	}
+	r.flushLogsTimer = time.AfterFunc(r.logBufferInterval, func() {
+		r.flushQueuedLogs(ctx)
+	})
+}
+
+func (r *Runner) flushQueuedLogs(ctx context.Context) {
+	r.mutex.Lock()
+	if r.flushLogsTimer != nil {
+		r.flushLogsTimer.Stop()
+	}
+	logs := r.queuedLogs
+	r.queuedLogs = make([]*proto.Log, 0)
+	r.mutex.Unlock()
+	_, err := r.update(ctx, &proto.UpdateJobRequest{
+		JobId: r.job.JobId,
+		Logs:  logs,
+	})
+	if err != nil {
+		if errors.Is(err, errUpdateSkipped) {
+			return
+		}
+		r.logger.Error(ctx, "flush queued logs", slog.Error(err))
 	}
 }

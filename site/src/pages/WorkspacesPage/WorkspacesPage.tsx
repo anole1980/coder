@@ -1,28 +1,35 @@
 import { useMachine } from "@xstate/react"
-import { FC, useEffect } from "react"
+import {
+  getPaginationContext,
+  nonInitialPage,
+} from "components/PaginationWidget/utils"
+import { FC } from "react"
 import { Helmet } from "react-helmet-async"
 import { useSearchParams } from "react-router-dom"
 import { workspaceFilterQuery } from "util/filters"
 import { pageTitle } from "util/page"
+import { PaginationMachineRef } from "xServices/pagination/paginationXService"
 import { workspacesMachine } from "xServices/workspaces/workspacesXService"
 import { WorkspacesPageView } from "./WorkspacesPageView"
 
 const WorkspacesPage: FC = () => {
-  const [workspacesState, send] = useMachine(workspacesMachine)
   const [searchParams, setSearchParams] = useSearchParams()
-  const { workspaceRefs } = workspacesState.context
+  const filter = searchParams.get("filter") ?? workspaceFilterQuery.me
+  const [workspacesState, send] = useMachine(workspacesMachine, {
+    context: {
+      filter,
+      paginationContext: getPaginationContext(searchParams),
+    },
+    actions: {
+      // Filter updates always cause page updates (to page 1), so only UPDATE_PAGE triggers updateURL
+      updateURL: (context, event) =>
+        setSearchParams({ page: event.page, filter: context.filter }),
+    },
+  })
 
-  // On page load, populate the table with workspaces
-  useEffect(() => {
-    const filter = searchParams.get("filter")
-    const query = filter ?? workspaceFilterQuery.me
-
-    send({
-      type: "GET_WORKSPACES",
-      query,
-    })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  const { workspaceRefs, count, getWorkspacesError } = workspacesState.context
+  const paginationRef = workspacesState.context
+    .paginationRef as PaginationMachineRef
 
   return (
     <>
@@ -34,13 +41,16 @@ const WorkspacesPage: FC = () => {
         filter={workspacesState.context.filter}
         isLoading={!workspaceRefs}
         workspaceRefs={workspaceRefs}
+        count={count}
+        getWorkspacesError={getWorkspacesError}
         onFilter={(query) => {
-          setSearchParams({ filter: query })
           send({
-            type: "GET_WORKSPACES",
+            type: "UPDATE_FILTER",
             query,
           })
         }}
+        paginationRef={paginationRef}
+        isNonInitialPage={nonInitialPage(searchParams)}
       />
     </>
   )

@@ -2,7 +2,7 @@ import { makeStyles } from "@material-ui/core/styles"
 import { useMachine } from "@xstate/react"
 import { FC, useEffect, useRef, useState } from "react"
 import { Helmet } from "react-helmet-async"
-import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom"
+import { useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { colors } from "theme/colors"
 import { v4 as uuidv4 } from "uuid"
 import * as XTerm from "xterm"
@@ -24,7 +24,6 @@ const TerminalPage: FC<
     readonly renderer?: XTerm.RendererType
   }>
 > = ({ renderer }) => {
-  const location = useLocation()
   const navigate = useNavigate()
   const styles = useStyles()
   const { username, workspace } = useParams()
@@ -62,8 +61,12 @@ const TerminalPage: FC<
   })
   const isConnected = terminalState.matches("connected")
   const isDisconnected = terminalState.matches("disconnected")
-  const { workspaceError, workspaceAgentError, workspaceAgent, websocketError } =
-    terminalState.context
+  const {
+    workspaceError,
+    workspaceAgentError,
+    workspaceAgent,
+    websocketError,
+  } = terminalState.context
 
   // Create the terminal!
   useEffect(() => {
@@ -118,17 +121,19 @@ const TerminalPage: FC<
   // the reconnection token and workspace name found
   // from the router.
   useEffect(() => {
-    const search = new URLSearchParams(location.search)
-    search.set("reconnect", reconnectionToken)
+    if (searchParams.get("reconnect") === reconnectionToken) {
+      return
+    }
+    searchParams.set("reconnect", reconnectionToken)
     navigate(
       {
-        search: search.toString(),
+        search: searchParams.toString(),
       },
       {
         replace: true,
       },
     )
-  }, [location.search, navigate, reconnectionToken])
+  }, [searchParams, navigate, reconnectionToken])
 
   // Apply terminal options based on connection state.
   useEffect(() => {
@@ -148,13 +153,20 @@ const TerminalPage: FC<
         disableStdin: true,
       }
       if (workspaceError instanceof Error) {
-        terminal.writeln(Language.workspaceErrorMessagePrefix + workspaceError.message)
+        terminal.writeln(
+          Language.workspaceErrorMessagePrefix + workspaceError.message,
+        )
       }
       if (workspaceAgentError instanceof Error) {
-        terminal.writeln(Language.workspaceAgentErrorMessagePrefix + workspaceAgentError.message)
+        terminal.writeln(
+          Language.workspaceAgentErrorMessagePrefix +
+            workspaceAgentError.message,
+        )
       }
       if (websocketError instanceof Error) {
-        terminal.writeln(Language.websocketErrorMessagePrefix + websocketError.message)
+        terminal.writeln(
+          Language.websocketErrorMessagePrefix + websocketError.message,
+        )
       }
       return
     }

@@ -1,18 +1,25 @@
 package httpmw
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"time"
 
 	"cdr.dev/slog"
 	"github.com/coder/coder/coderd/httpapi"
+	"github.com/coder/coder/coderd/tracing"
 )
 
 func Logger(log slog.Logger) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			start := time.Now()
-			sw := &httpapi.StatusWriter{ResponseWriter: w}
+
+			sw, ok := rw.(*tracing.StatusWriter)
+			if !ok {
+				panic(fmt.Sprintf("ResponseWriter not a *tracing.StatusWriter; got %T", rw))
+			}
 
 			httplog := log.With(
 				slog.F("host", httpapi.RequestHost(r)),
@@ -24,7 +31,7 @@ func Logger(log slog.Logger) func(next http.Handler) http.Handler {
 			next.ServeHTTP(sw, r)
 
 			// Don't log successful health check requests.
-			if r.URL.Path == "/api/v2" && sw.Status == 200 {
+			if r.URL.Path == "/api/v2" && sw.Status == http.StatusOK {
 				return
 			}
 
@@ -36,23 +43,25 @@ func Logger(log slog.Logger) func(next http.Handler) http.Handler {
 
 			// For status codes 400 and higher we
 			// want to log the response body.
-			if sw.Status >= 400 {
+			if sw.Status >= http.StatusInternalServerError {
 				httplog = httplog.With(
 					slog.F("response_body", string(sw.ResponseBody())),
 				)
 			}
 
+			// We should not log at level ERROR for 5xx status codes because 5xx
+			// includes proxy errors etc. It also causes slogtest to fail
+			// instantly without an error message by default.
 			logLevelFn := httplog.Debug
-			if sw.Status >= 400 {
+			if sw.Status >= http.StatusInternalServerError {
 				logLevelFn = httplog.Warn
 			}
-			if sw.Status >= 500 {
-				// Server errors should be treated as an ERROR
-				// log level.
-				logLevelFn = httplog.Error
-			}
 
-			logLevelFn(r.Context(), r.Method)
+			// We already capture most of this information in the span (minus
+			// the response body which we don't want to capture anyways).
+			tracing.RunWithoutSpan(r.Context(), func(ctx context.Context) {
+				logLevelFn(ctx, r.Method)
+			})
 		})
 	}
 }

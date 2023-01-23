@@ -40,14 +40,15 @@ func TestResetPassword(t *testing.T) {
 	serverDone := make(chan struct{})
 	serverCmd, cfg := clitest.New(t,
 		"server",
-		"--address", ":0",
+		"--http-address", ":0",
+		"--access-url", "http://example.com",
 		"--postgres-url", connectionURL,
 		"--cache-dir", t.TempDir(),
 	)
 	go func() {
 		defer close(serverDone)
 		err = serverCmd.ExecuteContext(ctx)
-		assert.ErrorIs(t, err, context.Canceled)
+		assert.NoError(t, err)
 	}()
 	var rawURL string
 	require.Eventually(t, func() bool {
@@ -59,10 +60,9 @@ func TestResetPassword(t *testing.T) {
 	client := codersdk.New(accessURL)
 
 	_, err = client.CreateFirstUser(ctx, codersdk.CreateFirstUserRequest{
-		Email:            email,
-		Username:         username,
-		Password:         oldPassword,
-		OrganizationName: "example",
+		Email:    email,
+		Username: username,
+		Password: oldPassword,
 	})
 	require.NoError(t, err)
 

@@ -2,8 +2,11 @@ package cli_test
 
 import (
 	"context"
+	"runtime"
+	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -26,7 +29,7 @@ func TestWorkspaceAgent(t *testing.T) {
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			Provision: []*proto.Provision_Response{{
+			ProvisionApply: []*proto.Provision_Response{{
 				Type: &proto.Provision_Response_Complete{
 					Complete: &proto.Provision_Complete{
 						Resources: []*proto.Resource{{
@@ -47,7 +50,7 @@ func TestWorkspaceAgent(t *testing.T) {
 		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
 		coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
 
-		cmd, _ := clitest.New(t, "agent", "--auth", "azure-instance-identity", "--agent-url", client.URL.String(), "--wireguard=false")
+		cmd, _ := clitest.New(t, "agent", "--auth", "azure-instance-identity", "--agent-url", client.URL.String())
 		ctx, cancelFunc := context.WithCancel(context.Background())
 		defer cancelFunc()
 		errC := make(chan error)
@@ -57,17 +60,17 @@ func TestWorkspaceAgent(t *testing.T) {
 			ctx := context.WithValue(ctx, "azure-client", metadataClient)
 			errC <- cmd.ExecuteContext(ctx)
 		}()
-		coderdtest.AwaitWorkspaceAgents(t, client, workspace.LatestBuild.ID)
-		resources, err := client.WorkspaceResourcesByBuild(ctx, workspace.LatestBuild.ID)
+		coderdtest.AwaitWorkspaceAgents(t, client, workspace.ID)
+		workspace, err := client.Workspace(ctx, workspace.ID)
 		require.NoError(t, err)
-		if assert.NotEmpty(t, resources) && assert.NotEmpty(t, resources[0].Agents) {
+		resources := workspace.LatestBuild.Resources
+		if assert.NotEmpty(t, workspace.LatestBuild.Resources) && assert.NotEmpty(t, resources[0].Agents) {
 			assert.NotEmpty(t, resources[0].Agents[0].Version)
 		}
 		dialer, err := client.DialWorkspaceAgent(ctx, resources[0].Agents[0].ID, nil)
 		require.NoError(t, err)
 		defer dialer.Close()
-		_, err = dialer.Ping()
-		require.NoError(t, err)
+		require.True(t, dialer.AwaitReachable(context.Background()))
 		cancelFunc()
 		err = <-errC
 		require.NoError(t, err)
@@ -84,7 +87,7 @@ func TestWorkspaceAgent(t *testing.T) {
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			Provision: []*proto.Provision_Response{{
+			ProvisionApply: []*proto.Provision_Response{{
 				Type: &proto.Provision_Response_Complete{
 					Complete: &proto.Provision_Complete{
 						Resources: []*proto.Resource{{
@@ -105,7 +108,7 @@ func TestWorkspaceAgent(t *testing.T) {
 		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
 		coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
 
-		cmd, _ := clitest.New(t, "agent", "--auth", "aws-instance-identity", "--agent-url", client.URL.String(), "--wireguard=false")
+		cmd, _ := clitest.New(t, "agent", "--auth", "aws-instance-identity", "--agent-url", client.URL.String())
 		ctx, cancelFunc := context.WithCancel(context.Background())
 		defer cancelFunc()
 		errC := make(chan error)
@@ -115,17 +118,17 @@ func TestWorkspaceAgent(t *testing.T) {
 			ctx := context.WithValue(ctx, "aws-client", metadataClient)
 			errC <- cmd.ExecuteContext(ctx)
 		}()
-		coderdtest.AwaitWorkspaceAgents(t, client, workspace.LatestBuild.ID)
-		resources, err := client.WorkspaceResourcesByBuild(ctx, workspace.LatestBuild.ID)
+		coderdtest.AwaitWorkspaceAgents(t, client, workspace.ID)
+		workspace, err := client.Workspace(ctx, workspace.ID)
 		require.NoError(t, err)
+		resources := workspace.LatestBuild.Resources
 		if assert.NotEmpty(t, resources) && assert.NotEmpty(t, resources[0].Agents) {
 			assert.NotEmpty(t, resources[0].Agents[0].Version)
 		}
 		dialer, err := client.DialWorkspaceAgent(ctx, resources[0].Agents[0].ID, nil)
 		require.NoError(t, err)
 		defer dialer.Close()
-		_, err = dialer.Ping()
-		require.NoError(t, err)
+		require.True(t, dialer.AwaitReachable(context.Background()))
 		cancelFunc()
 		err = <-errC
 		require.NoError(t, err)
@@ -142,7 +145,7 @@ func TestWorkspaceAgent(t *testing.T) {
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			Provision: []*proto.Provision_Response{{
+			ProvisionApply: []*proto.Provision_Response{{
 				Type: &proto.Provision_Response_Complete{
 					Complete: &proto.Provision_Complete{
 						Resources: []*proto.Resource{{
@@ -163,7 +166,7 @@ func TestWorkspaceAgent(t *testing.T) {
 		workspace := coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
 		coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
 
-		cmd, _ := clitest.New(t, "agent", "--auth", "google-instance-identity", "--agent-url", client.URL.String(), "--wireguard=false")
+		cmd, _ := clitest.New(t, "agent", "--auth", "google-instance-identity", "--agent-url", client.URL.String())
 		ctx, cancelFunc := context.WithCancel(context.Background())
 		defer cancelFunc()
 		errC := make(chan error)
@@ -173,17 +176,33 @@ func TestWorkspaceAgent(t *testing.T) {
 			ctx := context.WithValue(ctx, "gcp-client", metadata)
 			errC <- cmd.ExecuteContext(ctx)
 		}()
-		coderdtest.AwaitWorkspaceAgents(t, client, workspace.LatestBuild.ID)
-		resources, err := client.WorkspaceResourcesByBuild(ctx, workspace.LatestBuild.ID)
+		coderdtest.AwaitWorkspaceAgents(t, client, workspace.ID)
+		workspace, err := client.Workspace(ctx, workspace.ID)
 		require.NoError(t, err)
+		resources := workspace.LatestBuild.Resources
 		if assert.NotEmpty(t, resources) && assert.NotEmpty(t, resources[0].Agents) {
 			assert.NotEmpty(t, resources[0].Agents[0].Version)
 		}
 		dialer, err := client.DialWorkspaceAgent(ctx, resources[0].Agents[0].ID, nil)
 		require.NoError(t, err)
 		defer dialer.Close()
-		_, err = dialer.Ping()
+		require.True(t, dialer.AwaitReachable(context.Background()))
+		sshClient, err := dialer.SSHClient(ctx)
 		require.NoError(t, err)
+		defer sshClient.Close()
+		session, err := sshClient.NewSession()
+		require.NoError(t, err)
+		defer session.Close()
+		key := "CODER_AGENT_TOKEN"
+		command := "sh -c 'echo $" + key + "'"
+		if runtime.GOOS == "windows" {
+			command = "cmd.exe /c echo %" + key + "%"
+		}
+		token, err := session.CombinedOutput(command)
+		require.NoError(t, err)
+		_, err = uuid.Parse(strings.TrimSpace(string(token)))
+		require.NoError(t, err)
+
 		cancelFunc()
 		err = <-errC
 		require.NoError(t, err)

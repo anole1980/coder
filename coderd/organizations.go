@@ -16,19 +16,37 @@ import (
 	"github.com/coder/coder/codersdk"
 )
 
+// @Summary Get organization by ID
+// @ID get-organization-by-id
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Organizations
+// @Param organization path string true "Organization ID" format(uuid)
+// @Success 200 {object} codersdk.Organization
+// @Router /organizations/{organization} [get]
 func (api *API) organization(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	organization := httpmw.OrganizationParam(r)
 
-	if !api.Authorize(r, rbac.ActionRead, rbac.ResourceOrganization.
-		InOrg(organization.ID)) {
+	if !api.Authorize(r, rbac.ActionRead, organization) {
 		httpapi.ResourceNotFound(rw)
 		return
 	}
 
-	httpapi.Write(rw, http.StatusOK, convertOrganization(organization))
+	httpapi.Write(ctx, rw, http.StatusOK, convertOrganization(organization))
 }
 
+// @Summary Create organization
+// @ID create-organization
+// @Security CoderSessionToken
+// @Accept json
+// @Produce json
+// @Tags Organizations
+// @Param request body codersdk.CreateOrganizationRequest true "Create organization request"
+// @Success 201 {object} codersdk.Organization
+// @Router /organizations [post]
 func (api *API) postOrganizations(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	apiKey := httpmw.APIKey(r)
 	// Create organization uses the organization resource without an OrgID.
 	// This means you need the site wide permission to make a new organization.
@@ -38,19 +56,19 @@ func (api *API) postOrganizations(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	var req codersdk.CreateOrganizationRequest
-	if !httpapi.Read(rw, r, &req) {
+	if !httpapi.Read(ctx, rw, r, &req) {
 		return
 	}
 
-	_, err := api.Database.GetOrganizationByName(r.Context(), req.Name)
+	_, err := api.Database.GetOrganizationByName(ctx, req.Name)
 	if err == nil {
-		httpapi.Write(rw, http.StatusConflict, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusConflict, codersdk.Response{
 			Message: "Organization already exists with that name.",
 		})
 		return
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: fmt.Sprintf("Internal error fetching organization %q.", req.Name),
 			Detail:  err.Error(),
 		})
@@ -58,8 +76,8 @@ func (api *API) postOrganizations(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	var organization database.Organization
-	err = api.Database.InTx(func(store database.Store) error {
-		organization, err = store.InsertOrganization(r.Context(), database.InsertOrganizationParams{
+	err = api.Database.InTx(func(tx database.Store) error {
+		organization, err = tx.InsertOrganization(ctx, database.InsertOrganizationParams{
 			ID:        uuid.New(),
 			Name:      req.Name,
 			CreatedAt: database.Now(),
@@ -68,29 +86,38 @@ func (api *API) postOrganizations(rw http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return xerrors.Errorf("create organization: %w", err)
 		}
-		_, err = store.InsertOrganizationMember(r.Context(), database.InsertOrganizationMemberParams{
+		_, err = tx.InsertOrganizationMember(ctx, database.InsertOrganizationMemberParams{
 			OrganizationID: organization.ID,
 			UserID:         apiKey.UserID,
 			CreatedAt:      database.Now(),
 			UpdatedAt:      database.Now(),
 			Roles: []string{
-				rbac.RoleOrgAdmin(organization.ID),
+				// TODO: When organizations are allowed to be created, we should
+				// come back to determining the default role of the person who
+				// creates the org. Until that happens, all users in an organization
+				// should be just regular members.
+				rbac.RoleOrgMember(organization.ID),
 			},
 		})
 		if err != nil {
 			return xerrors.Errorf("create organization admin: %w", err)
 		}
+
+		_, err = tx.InsertAllUsersGroup(ctx, organization.ID)
+		if err != nil {
+			return xerrors.Errorf("create %q group: %w", database.AllUsersGroup, err)
+		}
 		return nil
-	})
+	}, nil)
 	if err != nil {
-		httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error inserting organization member.",
 			Detail:  err.Error(),
 		})
 		return
 	}
 
-	httpapi.Write(rw, http.StatusCreated, convertOrganization(organization))
+	httpapi.Write(ctx, rw, http.StatusCreated, convertOrganization(organization))
 }
 
 // convertOrganization consumes the database representation and outputs an API friendly representation.

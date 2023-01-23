@@ -5,7 +5,7 @@ import { AccountForm, AccountFormValues } from "./SettingsAccountForm"
 
 // NOTE: it does not matter what the role props of MockUser are set to,
 //       only that editable is set to true or false. This is passed from
-//       the call to /authorization done by authXService
+//       the call to /authorization done by auth provider
 describe("AccountForm", () => {
   describe("when editable is set to true", () => {
     it("allows updating username", async () => {
@@ -30,7 +30,9 @@ describe("AccountForm", () => {
       // Then
       const el = await screen.findByLabelText("Username")
       expect(el).toBeEnabled()
-      const btn = await screen.findByRole("button", { name: /Update settings/i })
+      const btn = await screen.findByRole("button", {
+        name: /Update settings/i,
+      })
       expect(btn).toBeEnabled()
     })
   })
@@ -58,7 +60,9 @@ describe("AccountForm", () => {
       // Then
       const el = await screen.findByLabelText("Username")
       expect(el).toBeDisabled()
-      const btn = await screen.findByRole("button", { name: /Update settings/i })
+      const btn = await screen.findByRole("button", {
+        name: /Update settings/i,
+      })
       expect(btn).toBeDisabled()
     })
   })

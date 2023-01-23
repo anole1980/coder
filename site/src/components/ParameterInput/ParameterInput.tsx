@@ -7,7 +7,6 @@ import TextField from "@material-ui/core/TextField"
 import { Stack } from "components/Stack/Stack"
 import { FC } from "react"
 import { ParameterSchema } from "../../api/typesGenerated"
-import { MONOSPACE_FONT_FAMILY } from "../../theme/constants"
 
 const isBoolean = (schema: ParameterSchema) => {
   return schema.validation_value_type === "bool"
@@ -16,10 +15,18 @@ const isBoolean = (schema: ParameterSchema) => {
 const ParameterLabel: React.FC<{ schema: ParameterSchema }> = ({ schema }) => {
   const styles = useStyles()
 
+  if (schema.name && schema.description) {
+    return (
+      <label htmlFor={schema.name}>
+        <span className={styles.labelName}>var.{schema.name}</span>
+        <span className={styles.labelDescription}>{schema.description}</span>
+      </label>
+    )
+  }
+
   return (
-    <label className={styles.label} htmlFor={schema.name}>
-      <strong>var.{schema.name}</strong>
-      {schema.description && <span className={styles.labelDescription}>{schema.description}</span>}
+    <label htmlFor={schema.name}>
+      <span className={styles.labelDescription}>var.{schema.name}</span>
     </label>
   )
 }
@@ -28,36 +35,44 @@ export interface ParameterInputProps {
   disabled?: boolean
   schema: ParameterSchema
   onChange: (value: string) => void
+  defaultValue?: string
 }
 
-export const ParameterInput: FC<React.PropsWithChildren<ParameterInputProps>> = ({
+export const ParameterInput: FC<ParameterInputProps> = ({
   disabled,
   onChange,
   schema,
+  defaultValue,
 }) => {
   const styles = useStyles()
 
   return (
-    <Stack direction="column" className={styles.root}>
+    <Stack direction="column" spacing={0.75}>
       <ParameterLabel schema={schema} />
       <div className={styles.input}>
-        <ParameterField disabled={disabled} onChange={onChange} schema={schema} />
+        <ParameterField
+          disabled={disabled}
+          onChange={onChange}
+          schema={schema}
+          defaultValue={defaultValue}
+        />
       </div>
     </Stack>
   )
 }
 
-const ParameterField: React.FC<React.PropsWithChildren<ParameterInputProps>> = ({
+const ParameterField: React.FC<ParameterInputProps> = ({
   disabled,
   onChange,
   schema,
+  defaultValue,
 }) => {
   if (schema.validation_contains && schema.validation_contains.length > 0) {
     return (
       <TextField
         id={schema.name}
         size="small"
-        defaultValue={schema.default_source_value}
+        defaultValue={defaultValue ?? schema.default_source_value}
         placeholder={schema.default_source_value}
         disabled={disabled}
         onChange={(event) => {
@@ -109,6 +124,7 @@ const ParameterField: React.FC<React.PropsWithChildren<ParameterInputProps>> = (
       size="small"
       disabled={disabled}
       placeholder={schema.default_source_value}
+      defaultValue={defaultValue ?? schema.default_source_value}
       onChange={(event) => {
         onChange(event.target.value)
       }}
@@ -117,19 +133,17 @@ const ParameterField: React.FC<React.PropsWithChildren<ParameterInputProps>> = (
 }
 
 const useStyles = makeStyles((theme) => ({
-  root: {
-    fontFamily: MONOSPACE_FONT_FAMILY,
-    paddingTop: theme.spacing(2),
-    paddingBottom: theme.spacing(2),
-  },
-  label: {
-    display: "flex",
-    flexDirection: "column",
-    fontSize: 21,
+  labelName: {
+    fontSize: 14,
+    color: theme.palette.text.secondary,
+    display: "block",
+    marginBottom: theme.spacing(0.5),
   },
   labelDescription: {
-    fontSize: 14,
-    marginTop: theme.spacing(1),
+    fontSize: 16,
+    color: theme.palette.text.primary,
+    display: "block",
+    fontWeight: 600,
   },
   input: {
     display: "flex",

@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -12,17 +13,17 @@ import (
 
 	"cdr.dev/slog"
 	"github.com/coder/coder/coderd/database"
-	"github.com/coder/coder/coderd/features"
-	"github.com/coder/coder/coderd/httpapi"
 	"github.com/coder/coder/coderd/httpmw"
+	"github.com/coder/coder/coderd/tracing"
 )
 
 type RequestParams struct {
-	Features features.Service
-	Log      slog.Logger
+	Audit Auditor
+	Log   slog.Logger
 
-	Request *http.Request
-	Action  database.AuditAction
+	Request          *http.Request
+	Action           database.AuditAction
+	AdditionalFields json.RawMessage
 }
 
 type Request[T Auditable] struct {
@@ -30,6 +31,20 @@ type Request[T Auditable] struct {
 
 	Old T
 	New T
+}
+
+type BuildAuditParams[T Auditable] struct {
+	Audit Auditor
+	Log   slog.Logger
+
+	UserID           uuid.UUID
+	JobID            uuid.UUID
+	Status           int
+	Action           database.AuditAction
+	AdditionalFields json.RawMessage
+
+	New T
+	Old T
 }
 
 func ResourceTarget[T Auditable](tgt T) string {
@@ -44,8 +59,13 @@ func ResourceTarget[T Auditable](tgt T) string {
 		return typed.Username
 	case database.Workspace:
 		return typed.Name
+	case database.WorkspaceBuild:
+		// this isn't used
+		return ""
 	case database.GitSSHKey:
 		return typed.PublicKey
+	case database.AuditableGroup:
+		return typed.Group.Name
 	default:
 		panic(fmt.Sprintf("unknown resource %T", tgt))
 	}
@@ -63,8 +83,12 @@ func ResourceID[T Auditable](tgt T) uuid.UUID {
 		return typed.ID
 	case database.Workspace:
 		return typed.ID
+	case database.WorkspaceBuild:
+		return typed.ID
 	case database.GitSSHKey:
 		return typed.UserID
+	case database.AuditableGroup:
+		return typed.Group.ID
 	default:
 		panic(fmt.Sprintf("unknown resource %T", tgt))
 	}
@@ -82,8 +106,12 @@ func ResourceType[T Auditable](tgt T) database.ResourceType {
 		return database.ResourceTypeUser
 	case database.Workspace:
 		return database.ResourceTypeWorkspace
+	case database.WorkspaceBuild:
+		return database.ResourceTypeWorkspaceBuild
 	case database.GitSSHKey:
 		return database.ResourceTypeGitSshKey
+	case database.AuditableGroup:
+		return database.ResourceTypeGroup
 	default:
 		panic(fmt.Sprintf("unknown resource %T", tgt))
 	}
@@ -93,22 +121,13 @@ func ResourceType[T Auditable](tgt T) database.ResourceType {
 // that should be deferred, causing the audit log to be committed when the
 // handler returns.
 func InitRequest[T Auditable](w http.ResponseWriter, p *RequestParams) (*Request[T], func()) {
-	sw, ok := w.(*httpapi.StatusWriter)
+	sw, ok := w.(*tracing.StatusWriter)
 	if !ok {
-		panic("dev error: http.ResponseWriter is not *httpapi.StatusWriter")
+		panic("dev error: http.ResponseWriter is not *tracing.StatusWriter")
 	}
 
 	req := &Request[T]{
 		params: p,
-	}
-
-	feats := struct {
-		Audit Auditor
-	}{}
-	err := p.Features.Get(&feats)
-	if err != nil {
-		p.Log.Error(p.Request.Context(), "unable to get auditor interface", slog.Error(err))
-		return req, func() {}
 	}
 
 	return req, func() {
@@ -120,20 +139,30 @@ func InitRequest[T Auditable](w http.ResponseWriter, p *RequestParams) (*Request
 			return
 		}
 
-		diff := Diff(feats.Audit, req.Old, req.New)
-		diffRaw, _ := json.Marshal(diff)
+		var diffRaw = []byte("{}")
+		// Only generate diffs if the request succeeded.
+		if sw.Status < 400 {
+			diff := Diff(p.Audit, req.Old, req.New)
 
-		ip, err := parseIP(p.Request.RemoteAddr)
-		if err != nil {
-			p.Log.Warn(logCtx, "parse ip", slog.Error(err))
+			var err error
+			diffRaw, err = json.Marshal(diff)
+			if err != nil {
+				p.Log.Warn(logCtx, "marshal diff", slog.Error(err))
+				diffRaw = []byte("{}")
+			}
 		}
 
-		err = feats.Audit.Export(ctx, database.AuditLog{
+		if p.AdditionalFields == nil {
+			p.AdditionalFields = json.RawMessage("{}")
+		}
+
+		ip := parseIP(p.Request.RemoteAddr)
+		auditLog := database.AuditLog{
 			ID:               uuid.New(),
 			Time:             database.Now(),
 			UserID:           httpmw.APIKey(p.Request).UserID,
 			Ip:               ip,
-			UserAgent:        p.Request.UserAgent(),
+			UserAgent:        sql.NullString{String: p.Request.UserAgent(), Valid: true},
 			ResourceType:     either(req.Old, req.New, ResourceType[T]),
 			ResourceID:       either(req.Old, req.New, ResourceID[T]),
 			ResourceTarget:   either(req.Old, req.New, ResourceTarget[T]),
@@ -141,12 +170,54 @@ func InitRequest[T Auditable](w http.ResponseWriter, p *RequestParams) (*Request
 			Diff:             diffRaw,
 			StatusCode:       int32(sw.Status),
 			RequestID:        httpmw.RequestID(p.Request),
-			AdditionalFields: json.RawMessage("{}"),
-		})
+			AdditionalFields: p.AdditionalFields,
+		}
+		err := p.Audit.Export(ctx, auditLog)
 		if err != nil {
-			p.Log.Error(logCtx, "export audit log", slog.Error(err))
+			p.Log.Error(logCtx, "export audit log",
+				slog.F("audit_log", auditLog),
+				slog.Error(err),
+			)
 			return
 		}
+	}
+}
+
+// BuildAudit creates an audit log for a workspace build.
+// The audit log is committed upon invocation.
+func BuildAudit[T Auditable](ctx context.Context, p *BuildAuditParams[T]) {
+	// As the audit request has not been initiated directly by a user, we omit
+	// certain user details.
+	ip := parseIP("")
+	// We do not show diffs for build audit logs
+	var diffRaw = []byte("{}")
+
+	if p.AdditionalFields == nil {
+		p.AdditionalFields = json.RawMessage("{}")
+	}
+
+	auditLog := database.AuditLog{
+		ID:               uuid.New(),
+		Time:             database.Now(),
+		UserID:           p.UserID,
+		Ip:               ip,
+		UserAgent:        sql.NullString{},
+		ResourceType:     either(p.Old, p.New, ResourceType[T]),
+		ResourceID:       either(p.Old, p.New, ResourceID[T]),
+		ResourceTarget:   either(p.Old, p.New, ResourceTarget[T]),
+		Action:           p.Action,
+		Diff:             diffRaw,
+		StatusCode:       int32(p.Status),
+		RequestID:        p.JobID,
+		AdditionalFields: p.AdditionalFields,
+	}
+	err := p.Audit.Export(ctx, auditLog)
+	if err != nil {
+		p.Log.Error(ctx, "export audit log",
+			slog.F("audit_log", auditLog),
+			slog.Error(err),
+		)
+		return
 	}
 }
 
@@ -160,16 +231,8 @@ func either[T Auditable, R any](old, new T, fn func(T) R) R {
 	}
 }
 
-func parseIP(ipStr string) (pqtype.Inet, error) {
-	var err error
-
-	ipStr, _, err = net.SplitHostPort(ipStr)
-	if err != nil {
-		return pqtype.Inet{}, err
-	}
-
+func parseIP(ipStr string) pqtype.Inet {
 	ip := net.ParseIP(ipStr)
-
 	ipNet := net.IPNet{}
 	if ip != nil {
 		ipNet = net.IPNet{
@@ -181,5 +244,5 @@ func parseIP(ipStr string) (pqtype.Inet, error) {
 	return pqtype.Inet{
 		IPNet: ipNet,
 		Valid: ip != nil,
-	}, nil
+	}
 }

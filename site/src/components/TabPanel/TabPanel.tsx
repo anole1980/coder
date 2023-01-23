@@ -1,9 +1,7 @@
 import { makeStyles } from "@material-ui/core/styles"
-import { fade } from "@material-ui/core/styles/colorManipulator"
+import { alpha } from "@material-ui/core/styles/colorManipulator"
 import { FC } from "react"
 import { TabSidebar, TabSidebarItem } from "../TabSidebar/TabSidebar"
-
-export type AdminMenuItemCallback = (menuItem: string) => void
 
 export interface TabPanelProps {
   title: string
@@ -53,7 +51,7 @@ const useStyles = makeStyles((theme) => ({
     position: "absolute",
     left: -50,
     top: 31,
-    color: fade(theme.palette.common.black, 0.1),
+    color: alpha(theme.palette.common.black, 0.1),
     transition: "transform 0.3s ease",
     zIndex: -1,
   },

@@ -15,11 +15,14 @@ describe("AuditPage", () => {
         onActivateUser={() => jest.fn()}
         onResetUserPassword={() => jest.fn()}
         onUpdateUserRoles={() => jest.fn()}
+        isNonInitialPage={false}
       />,
     )
 
     // Then
-    const tooltipIcon = await screen.findByRole("button", { name: TooltipLanguage.ariaLabel })
+    const tooltipIcon = await screen.findByRole("button", {
+      name: TooltipLanguage.ariaLabel,
+    })
     fireEvent.mouseOver(tooltipIcon)
     expect(await screen.findByText(UserRoleLanguage.title)).toBeInTheDocument()
   })

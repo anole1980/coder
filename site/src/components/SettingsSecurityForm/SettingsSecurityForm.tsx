@@ -1,11 +1,11 @@
 import TextField from "@material-ui/core/TextField"
-import { ErrorSummary } from "components/ErrorSummary/ErrorSummary"
 import { FormikContextType, FormikTouched, useFormik } from "formik"
-import React from "react"
+import { FC } from "react"
 import * as Yup from "yup"
-import { getFormHelpersWithError, onChangeTrimmed } from "../../util/formUtils"
+import { getFormHelpers } from "../../util/formUtils"
 import { LoadingButton } from "../LoadingButton/LoadingButton"
 import { Stack } from "../Stack/Stack"
+import { AlertBanner } from "components/AlertBanner/AlertBanner"
 
 interface SecurityFormValues {
   old_password: string
@@ -49,29 +49,37 @@ export interface SecurityFormProps {
   initialTouched?: FormikTouched<SecurityFormValues>
 }
 
-export const SecurityForm: React.FC<SecurityFormProps> = ({
+export const SecurityForm: FC<SecurityFormProps> = ({
   isLoading,
   onSubmit,
   initialValues,
   updateSecurityError,
   initialTouched,
 }) => {
-  const form: FormikContextType<SecurityFormValues> = useFormik<SecurityFormValues>({
-    initialValues,
-    validationSchema,
-    onSubmit,
-    initialTouched,
-  })
-  const getFieldHelpers = getFormHelpersWithError<SecurityFormValues>(form, updateSecurityError)
+  const form: FormikContextType<SecurityFormValues> =
+    useFormik<SecurityFormValues>({
+      initialValues,
+      validationSchema,
+      onSubmit,
+      initialTouched,
+    })
+  const getFieldHelpers = getFormHelpers<SecurityFormValues>(
+    form,
+    updateSecurityError,
+  )
 
   return (
     <>
       <form onSubmit={form.handleSubmit}>
         <Stack>
-          {updateSecurityError ? <ErrorSummary error={updateSecurityError} /> : <></>}
+          {Boolean(updateSecurityError) && (
+            <AlertBanner severity="error" error={updateSecurityError} />
+          )}
           <TextField
             {...getFieldHelpers("old_password")}
-            onChange={onChangeTrimmed(form)}
+            InputLabelProps={{
+              shrink: true,
+            }}
             autoComplete="old_password"
             fullWidth
             label={Language.oldPasswordLabel}
@@ -80,7 +88,9 @@ export const SecurityForm: React.FC<SecurityFormProps> = ({
           />
           <TextField
             {...getFieldHelpers("password")}
-            onChange={onChangeTrimmed(form)}
+            InputLabelProps={{
+              shrink: true,
+            }}
             autoComplete="password"
             fullWidth
             label={Language.newPasswordLabel}
@@ -89,7 +99,9 @@ export const SecurityForm: React.FC<SecurityFormProps> = ({
           />
           <TextField
             {...getFieldHelpers("confirm_password")}
-            onChange={onChangeTrimmed(form)}
+            InputLabelProps={{
+              shrink: true,
+            }}
             autoComplete="confirm_password"
             fullWidth
             label={Language.confirmPasswordLabel}
@@ -98,7 +110,11 @@ export const SecurityForm: React.FC<SecurityFormProps> = ({
           />
 
           <div>
-            <LoadingButton loading={isLoading} type="submit" variant="contained">
+            <LoadingButton
+              loading={isLoading}
+              type="submit"
+              variant="contained"
+            >
               {isLoading ? "" : Language.updatePassword}
             </LoadingButton>
           </div>

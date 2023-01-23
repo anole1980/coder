@@ -15,6 +15,15 @@ type cspViolation struct {
 }
 
 // logReportCSPViolations will log all reported csp violations.
+//
+// @Summary Report CSP violations
+// @ID report-csp-violations
+// @Security CoderSessionToken
+// @Accept json
+// @Tags General
+// @Param request body cspViolation true "Violation report"
+// @Success 200
+// @Router /csp/reports [post]
 func (api *API) logReportCSPViolations(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var v cspViolation
@@ -23,7 +32,7 @@ func (api *API) logReportCSPViolations(rw http.ResponseWriter, r *http.Request) 
 	err := dec.Decode(&v)
 	if err != nil {
 		api.Logger.Warn(ctx, "csp violation", slog.Error(err))
-		httpapi.Write(rw, http.StatusBadRequest, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 			Message: "Failed to read body, invalid json.",
 			Detail:  err.Error(),
 		})
@@ -34,7 +43,7 @@ func (api *API) logReportCSPViolations(rw http.ResponseWriter, r *http.Request) 
 	for k, v := range v.Report {
 		fields = append(fields, slog.F(k, v))
 	}
-	api.Logger.Warn(ctx, "csp violation", fields...)
+	api.Logger.Debug(ctx, "csp violation", fields...)
 
-	httpapi.Write(rw, http.StatusOK, "ok")
+	httpapi.Write(ctx, rw, http.StatusOK, "ok")
 }

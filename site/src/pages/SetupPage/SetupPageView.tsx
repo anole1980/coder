@@ -1,5 +1,9 @@
+import Box from "@material-ui/core/Box"
+import Checkbox from "@material-ui/core/Checkbox"
 import FormHelperText from "@material-ui/core/FormHelperText"
+import { makeStyles } from "@material-ui/core/styles"
 import TextField from "@material-ui/core/TextField"
+import Typography from "@material-ui/core/Typography"
 import { LoadingButton } from "components/LoadingButton/LoadingButton"
 import { SignInLayout } from "components/SignInLayout/SignInLayout"
 import { Stack } from "components/Stack/Stack"
@@ -13,23 +17,19 @@ export const Language = {
   emailLabel: "Email",
   passwordLabel: "Password",
   usernameLabel: "Username",
-  organizationLabel: "Organization name",
   emailInvalid: "Please enter a valid email address.",
   emailRequired: "Please enter an email address.",
   passwordRequired: "Please enter a password.",
-  organizationRequired: "Please enter an organization name.",
   create: "Setup account",
-  welcomeMessage: (
-    <>
-      Set up <strong>your account</strong>
-    </>
-  ),
+  welcomeMessage: <>Welcome to Coder</>,
 }
 
 const validationSchema = Yup.object({
-  email: Yup.string().trim().email(Language.emailInvalid).required(Language.emailRequired),
+  email: Yup.string()
+    .trim()
+    .email(Language.emailInvalid)
+    .required(Language.emailRequired),
   password: Yup.string().required(Language.passwordRequired),
-  organization: Yup.string().required(Language.organizationRequired),
   username: nameValidator(Language.usernameLabel),
 })
 
@@ -52,26 +52,22 @@ export const SetupPageView: React.FC<SetupPageViewProps> = ({
         email: "",
         password: "",
         username: "",
-        organization: "",
+        trial: true,
       },
       validationSchema,
       onSubmit,
     })
-  const getFieldHelpers = getFormHelpers<TypesGen.CreateFirstUserRequest>(form, formErrors)
+  const getFieldHelpers = getFormHelpers<TypesGen.CreateFirstUserRequest>(
+    form,
+    formErrors,
+  )
+  const styles = useStyles()
 
   return (
     <SignInLayout>
       <Welcome message={Language.welcomeMessage} />
       <form onSubmit={form.handleSubmit}>
         <Stack>
-          <TextField
-            {...getFieldHelpers("organization")}
-            onChange={onChangeTrimmed(form)}
-            autoFocus
-            fullWidth
-            label={Language.organizationLabel}
-            variant="outlined"
-          />
           <TextField
             {...getFieldHelpers("username")}
             onChange={onChangeTrimmed(form)}
@@ -97,8 +93,38 @@ export const SetupPageView: React.FC<SetupPageViewProps> = ({
             type="password"
             variant="outlined"
           />
-          {genericError && <FormHelperText error>{genericError}</FormHelperText>}
-          <LoadingButton fullWidth variant="contained" loading={isLoading} type="submit">
+          {genericError && (
+            <FormHelperText error>{genericError}</FormHelperText>
+          )}
+          <div className={styles.callout}>
+            <Box display="flex">
+              <div>
+                <Checkbox
+                  id="trial"
+                  name="trial"
+                  defaultChecked
+                  value={form.values.trial}
+                  onChange={form.handleChange}
+                />
+              </div>
+
+              <Box>
+                <Typography variant="h6" style={{ fontSize: 14 }}>
+                  Start a 30-day free trial of Enterprise
+                </Typography>
+                <Typography variant="caption" color="textSecondary">
+                  Get access to high availability, template RBAC, audit logging,
+                  quotas, and more.
+                </Typography>
+              </Box>
+            </Box>
+          </div>
+          <LoadingButton
+            fullWidth
+            variant="contained"
+            loading={isLoading}
+            type="submit"
+          >
             {Language.create}
           </LoadingButton>
         </Stack>
@@ -106,3 +132,9 @@ export const SetupPageView: React.FC<SetupPageViewProps> = ({
     </SignInLayout>
   )
 }
+
+const useStyles = makeStyles(() => ({
+  callout: {
+    borderRadius: 16,
+  },
+}))

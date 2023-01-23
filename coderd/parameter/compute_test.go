@@ -18,7 +18,6 @@ func TestCompute(t *testing.T) {
 	generateScope := func() parameter.ComputeScope {
 		return parameter.ComputeScope{
 			TemplateImportJobID: uuid.New(),
-			OrganizationID:      uuid.New(),
 			TemplateID: uuid.NullUUID{
 				UUID:  uuid.New(),
 				Valid: true,
@@ -27,7 +26,6 @@ func TestCompute(t *testing.T) {
 				UUID:  uuid.New(),
 				Valid: true,
 			},
-			UserID: uuid.New(),
 		}
 	}
 	type parameterOptions struct {
@@ -53,6 +51,7 @@ func TestCompute(t *testing.T) {
 			AllowOverrideSource:      opts.AllowOverrideSource,
 			AllowOverrideDestination: opts.AllowOverrideDestination,
 			DefaultDestinationScheme: opts.DefaultDestinationScheme,
+			ValidationTypeSystem:     database.ParameterTypeSystemNone,
 		})
 		require.NoError(t, err)
 		return param
@@ -63,10 +62,12 @@ func TestCompute(t *testing.T) {
 		db := databasefake.New()
 		scope := generateScope()
 		_, err := db.InsertParameterSchema(context.Background(), database.InsertParameterSchemaParams{
-			ID:                  uuid.New(),
-			JobID:               scope.TemplateImportJobID,
-			Name:                "hey",
-			DefaultSourceScheme: database.ParameterSourceSchemeNone,
+			ID:                       uuid.New(),
+			JobID:                    scope.TemplateImportJobID,
+			Name:                     "hey",
+			DefaultSourceScheme:      database.ParameterSourceSchemeNone,
+			DefaultDestinationScheme: database.ParameterDestinationSchemeNone,
+			ValidationTypeSystem:     database.ParameterTypeSystemNone,
 		})
 		require.NoError(t, err)
 		computed, err := parameter.Compute(context.Background(), db, scope, nil)

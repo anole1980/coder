@@ -23,7 +23,7 @@ import (
 	"github.com/coder/coder/coderd/httpapi"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/enterprise/cli"
-	"github.com/coder/coder/enterprise/coderd"
+	"github.com/coder/coder/enterprise/coderd/coderdenttest"
 	"github.com/coder/coder/pty/ptytest"
 	"github.com/coder/coder/testutil"
 )
@@ -124,7 +124,7 @@ func TestLicensesAddReal(t *testing.T) {
 	t.Parallel()
 	t.Run("Fails", func(t *testing.T) {
 		t.Parallel()
-		client := coderdtest.New(t, &coderdtest.Options{APIBuilder: coderd.NewEnterprise})
+		client := coderdenttest.New(t, nil)
 		coderdtest.CreateFirstUser(t, client)
 		cmd, root := clitest.NewWithSubcommands(t, cli.EnterpriseSubcommands(),
 			"licenses", "add", "-l", fakeLicenseJWT)
@@ -175,7 +175,7 @@ func TestLicensesListReal(t *testing.T) {
 	t.Parallel()
 	t.Run("Empty", func(t *testing.T) {
 		t.Parallel()
-		client := coderdtest.New(t, &coderdtest.Options{APIBuilder: coderd.NewEnterprise})
+		client := coderdenttest.New(t, nil)
 		coderdtest.CreateFirstUser(t, client)
 		cmd, root := clitest.NewWithSubcommands(t, cli.EnterpriseSubcommands(),
 			"licenses", "list")
@@ -219,7 +219,7 @@ func TestLicensesDeleteReal(t *testing.T) {
 	t.Parallel()
 	t.Run("Empty", func(t *testing.T) {
 		t.Parallel()
-		client := coderdtest.New(t, &coderdtest.Options{APIBuilder: coderd.NewEnterprise})
+		client := coderdenttest.New(t, nil)
 		coderdtest.CreateFirstUser(t, client)
 		cmd, root := clitest.NewWithSubcommands(t, cli.EnterpriseSubcommands(),
 			"licenses", "delete", "1")
@@ -337,17 +337,18 @@ func (s *fakeLicenseAPI) deleteLicense(rw http.ResponseWriter, r *http.Request) 
 	rw.WriteHeader(200)
 }
 
-func (*fakeLicenseAPI) entitlements(rw http.ResponseWriter, _ *http.Request) {
-	features := make(map[string]codersdk.Feature)
+func (*fakeLicenseAPI) entitlements(rw http.ResponseWriter, r *http.Request) {
+	features := make(map[codersdk.FeatureName]codersdk.Feature)
 	for _, f := range codersdk.FeatureNames {
 		features[f] = codersdk.Feature{
 			Entitlement: codersdk.EntitlementEntitled,
 			Enabled:     true,
 		}
 	}
-	httpapi.Write(rw, http.StatusOK, codersdk.Entitlements{
-		Features:   features,
-		Warnings:   []string{testWarning},
-		HasLicense: true,
+	httpapi.Write(r.Context(), rw, http.StatusOK, codersdk.Entitlements{
+		Features:     features,
+		Warnings:     []string{testWarning},
+		HasLicense:   true,
+		Experimental: true,
 	})
 }

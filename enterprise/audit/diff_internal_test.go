@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/utils/pointer"
@@ -65,7 +66,6 @@ func Test_diffValues(t *testing.T) {
 		})
 	})
 
-	//nolint:revive
 	t.Run("PointerField", func(t *testing.T) {
 		t.Parallel()
 
@@ -92,6 +92,83 @@ func Test_diffValues(t *testing.T) {
 				left: foo{Bar: pointer.StringPtr("baz")}, right: foo{Bar: nil},
 				exp: audit.Map{
 					"bar": audit.OldNew{Old: "baz", New: ""},
+				},
+			},
+		})
+	})
+
+	//nolint:revive
+	t.Run("EmbeddedStruct", func(t *testing.T) {
+		t.Parallel()
+
+		type Bar struct {
+			Baz  int    `json:"baz"`
+			Buzz string `json:"buzz"`
+		}
+
+		type PtrBar struct {
+			Qux string `json:"qux"`
+		}
+
+		type foo struct {
+			Bar
+			*PtrBar
+			TopLevel string `json:"top_level"`
+		}
+
+		table := auditMap(map[any]map[string]Action{
+			&foo{}: {
+				"baz":       ActionTrack,
+				"buzz":      ActionTrack,
+				"qux":       ActionTrack,
+				"top_level": ActionTrack,
+			},
+		})
+
+		runDiffValuesTests(t, table, []diffTest{
+			{
+				name:  "SingleFieldChange",
+				left:  foo{TopLevel: "top-before", Bar: Bar{Baz: 1, Buzz: "before"}, PtrBar: &PtrBar{Qux: "qux-before"}},
+				right: foo{TopLevel: "top-after", Bar: Bar{Baz: 0, Buzz: "after"}, PtrBar: &PtrBar{Qux: "qux-after"}},
+				exp: audit.Map{
+					"baz":       audit.OldNew{Old: 1, New: 0},
+					"buzz":      audit.OldNew{Old: "before", New: "after"},
+					"qux":       audit.OldNew{Old: "qux-before", New: "qux-after"},
+					"top_level": audit.OldNew{Old: "top-before", New: "top-after"},
+				},
+			},
+			{
+				name:  "Empty",
+				left:  foo{},
+				right: foo{},
+				exp:   audit.Map{},
+			},
+			{
+				name:  "NoChange",
+				left:  foo{TopLevel: "top-before", Bar: Bar{Baz: 1, Buzz: "before"}, PtrBar: &PtrBar{Qux: "qux-before"}},
+				right: foo{TopLevel: "top-before", Bar: Bar{Baz: 1, Buzz: "before"}, PtrBar: &PtrBar{Qux: "qux-before"}},
+				exp:   audit.Map{},
+			},
+			{
+				name:  "LeftEmpty",
+				left:  foo{},
+				right: foo{TopLevel: "top-after", Bar: Bar{Baz: 1, Buzz: "after"}, PtrBar: &PtrBar{Qux: "qux-after"}},
+				exp: audit.Map{
+					"baz":       audit.OldNew{Old: 0, New: 1},
+					"buzz":      audit.OldNew{Old: "", New: "after"},
+					"qux":       audit.OldNew{Old: "", New: "qux-after"},
+					"top_level": audit.OldNew{Old: "", New: "top-after"},
+				},
+			},
+			{
+				name:  "RightNil",
+				left:  foo{TopLevel: "top-before", Bar: Bar{Baz: 1, Buzz: "before"}, PtrBar: &PtrBar{Qux: "qux-before"}},
+				right: foo{},
+				exp: audit.Map{
+					"baz":       audit.OldNew{Old: 1, New: 0},
+					"buzz":      audit.OldNew{Old: "before", New: ""},
+					"qux":       audit.OldNew{Old: "qux-before", New: ""},
+					"top_level": audit.OldNew{Old: "top-before", New: ""},
 				},
 			},
 		})
@@ -241,27 +318,24 @@ func Test_diff(t *testing.T) {
 			name: "Create",
 			left: audit.Empty[database.Template](),
 			right: database.Template{
-				ID:                   uuid.UUID{1},
-				CreatedAt:            time.Now(),
-				UpdatedAt:            time.Now(),
-				OrganizationID:       uuid.UUID{2},
-				Deleted:              false,
-				Name:                 "rust",
-				Provisioner:          database.ProvisionerTypeTerraform,
-				ActiveVersionID:      uuid.UUID{3},
-				MaxTtl:               int64(time.Hour),
-				MinAutostartInterval: int64(time.Minute),
-				CreatedBy:            uuid.UUID{4},
+				ID:              uuid.UUID{1},
+				CreatedAt:       time.Now(),
+				UpdatedAt:       time.Now(),
+				OrganizationID:  uuid.UUID{2},
+				Deleted:         false,
+				Name:            "rust",
+				Provisioner:     database.ProvisionerTypeTerraform,
+				ActiveVersionID: uuid.UUID{3},
+				DefaultTTL:      int64(time.Hour),
+				CreatedBy:       uuid.UUID{4},
 			},
 			exp: audit.Map{
-				"id":                     audit.OldNew{Old: "", New: uuid.UUID{1}.String()},
-				"organization_id":        audit.OldNew{Old: "", New: uuid.UUID{2}.String()},
-				"name":                   audit.OldNew{Old: "", New: "rust"},
-				"provisioner":            audit.OldNew{Old: database.ProvisionerType(""), New: database.ProvisionerTypeTerraform},
-				"active_version_id":      audit.OldNew{Old: "", New: uuid.UUID{3}.String()},
-				"max_ttl":                audit.OldNew{Old: int64(0), New: int64(time.Hour)},
-				"min_autostart_interval": audit.OldNew{Old: int64(0), New: int64(time.Minute)},
-				"created_by":             audit.OldNew{Old: "", New: uuid.UUID{4}.String()},
+				"id":                audit.OldNew{Old: "", New: uuid.UUID{1}.String()},
+				"name":              audit.OldNew{Old: "", New: "rust"},
+				"provisioner":       audit.OldNew{Old: database.ProvisionerType(""), New: database.ProvisionerTypeTerraform},
+				"active_version_id": audit.OldNew{Old: "", New: uuid.UUID{3}.String()},
+				"default_ttl":       audit.OldNew{Old: int64(0), New: int64(time.Hour)},
+				"created_by":        audit.OldNew{Old: "", New: uuid.UUID{4}.String()},
 			},
 		},
 	})
@@ -277,14 +351,13 @@ func Test_diff(t *testing.T) {
 				UpdatedAt:      time.Now(),
 				OrganizationID: uuid.UUID{3},
 				Name:           "rust",
-				CreatedBy:      uuid.NullUUID{UUID: uuid.UUID{4}, Valid: true},
+				CreatedBy:      uuid.UUID{4},
 			},
 			exp: audit.Map{
-				"id":              audit.OldNew{Old: "", New: uuid.UUID{1}.String()},
-				"template_id":     audit.OldNew{Old: "", New: uuid.UUID{2}.String()},
-				"organization_id": audit.OldNew{Old: "", New: uuid.UUID{3}.String()},
-				"created_by":      audit.OldNew{Old: "", New: uuid.UUID{4}.String()},
-				"name":            audit.OldNew{Old: "", New: "rust"},
+				"id":          audit.OldNew{Old: "", New: uuid.UUID{1}.String()},
+				"template_id": audit.OldNew{Old: "", New: uuid.UUID{2}.String()},
+				"created_by":  audit.OldNew{Old: "", New: uuid.UUID{4}.String()},
+				"name":        audit.OldNew{Old: "", New: "rust"},
 			},
 		},
 		{
@@ -297,13 +370,12 @@ func Test_diff(t *testing.T) {
 				UpdatedAt:      time.Now(),
 				OrganizationID: uuid.UUID{3},
 				Name:           "rust",
-				CreatedBy:      uuid.NullUUID{UUID: uuid.UUID{4}, Valid: true},
+				CreatedBy:      uuid.UUID{4},
 			},
 			exp: audit.Map{
-				"id":              audit.OldNew{Old: "", New: uuid.UUID{1}.String()},
-				"organization_id": audit.OldNew{Old: "", New: uuid.UUID{3}.String()},
-				"created_by":      audit.OldNew{Old: "null", New: uuid.UUID{4}.String()},
-				"name":            audit.OldNew{Old: "", New: "rust"},
+				"id":         audit.OldNew{Old: "", New: uuid.UUID{1}.String()},
+				"created_by": audit.OldNew{Old: "", New: uuid.UUID{4}.String()},
+				"name":       audit.OldNew{Old: "", New: "rust"},
 			},
 		},
 	})
@@ -328,7 +400,7 @@ func Test_diff(t *testing.T) {
 				"username":        audit.OldNew{Old: "", New: "colin"},
 				"hashed_password": audit.OldNew{Old: ([]byte)(nil), New: ([]byte)(nil), Secret: true},
 				"status":          audit.OldNew{Old: database.UserStatus(""), New: database.UserStatusActive},
-				"rbac_roles":      audit.OldNew{Old: ([]string)(nil), New: []string{"omega admin"}},
+				"rbac_roles":      audit.OldNew{Old: (pq.StringArray)(nil), New: pq.StringArray{"omega admin"}},
 			},
 		},
 	})

@@ -13,7 +13,8 @@ import (
 func templates() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "templates",
-		Short:   "Create, manage, and deploy templates",
+		Short:   "Manage templates",
+		Long:    "Templates are written in standard Terraform and describe the infrastructure for workspaces",
 		Aliases: []string{"template"},
 		Example: formatExamples(
 			example{
@@ -29,6 +30,9 @@ func templates() *cobra.Command {
 				Command:     "coder templates push my-template",
 			},
 		),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
+		},
 	}
 	cmd.AddCommand(
 		templateCreate(),
@@ -46,15 +50,14 @@ func templates() *cobra.Command {
 }
 
 type templateTableRow struct {
-	Name                 string                   `table:"name"`
-	CreatedAt            string                   `table:"created at"`
-	LastUpdated          string                   `table:"last updated"`
-	OrganizationID       uuid.UUID                `table:"organization id"`
-	Provisioner          codersdk.ProvisionerType `table:"provisioner"`
-	ActiveVersionID      uuid.UUID                `table:"active version id"`
-	UsedBy               string                   `table:"used by"`
-	MaxTTL               time.Duration            `table:"max ttl"`
-	MinAutostartInterval time.Duration            `table:"min autostart"`
+	Name            string                   `table:"name"`
+	CreatedAt       string                   `table:"created at"`
+	LastUpdated     string                   `table:"last updated"`
+	OrganizationID  uuid.UUID                `table:"organization id"`
+	Provisioner     codersdk.ProvisionerType `table:"provisioner"`
+	ActiveVersionID uuid.UUID                `table:"active version id"`
+	UsedBy          string                   `table:"used by"`
+	DefaultTTL      time.Duration            `table:"default ttl"`
 }
 
 // displayTemplates will return a table displaying all templates passed in.
@@ -64,15 +67,14 @@ func displayTemplates(filterColumns []string, templates ...codersdk.Template) (s
 	rows := make([]templateTableRow, len(templates))
 	for i, template := range templates {
 		rows[i] = templateTableRow{
-			Name:                 template.Name,
-			CreatedAt:            template.CreatedAt.Format("January 2, 2006"),
-			LastUpdated:          template.UpdatedAt.Format("January 2, 2006"),
-			OrganizationID:       template.OrganizationID,
-			Provisioner:          template.Provisioner,
-			ActiveVersionID:      template.ActiveVersionID,
-			UsedBy:               cliui.Styles.Fuchsia.Render(formatActiveDevelopers(template.ActiveUserCount)),
-			MaxTTL:               (time.Duration(template.MaxTTLMillis) * time.Millisecond),
-			MinAutostartInterval: (time.Duration(template.MinAutostartIntervalMillis) * time.Millisecond),
+			Name:            template.Name,
+			CreatedAt:       template.CreatedAt.Format("January 2, 2006"),
+			LastUpdated:     template.UpdatedAt.Format("January 2, 2006"),
+			OrganizationID:  template.OrganizationID,
+			Provisioner:     template.Provisioner,
+			ActiveVersionID: template.ActiveVersionID,
+			UsedBy:          cliui.Styles.Fuchsia.Render(formatActiveDevelopers(template.ActiveUserCount)),
+			DefaultTTL:      (time.Duration(template.DefaultTTLMillis) * time.Millisecond),
 		}
 	}
 

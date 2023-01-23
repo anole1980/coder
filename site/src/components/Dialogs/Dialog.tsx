@@ -1,67 +1,14 @@
-import MuiDialog, { DialogProps as MuiDialogProps } from "@material-ui/core/Dialog"
-import MuiDialogTitle from "@material-ui/core/DialogTitle"
-import { darken, fade, lighten, makeStyles } from "@material-ui/core/styles"
-import SvgIcon from "@material-ui/core/SvgIcon"
+import MuiDialog, {
+  DialogProps as MuiDialogProps,
+} from "@material-ui/core/Dialog"
+import { alpha, darken, lighten, makeStyles } from "@material-ui/core/styles"
 import * as React from "react"
 import { combineClasses } from "../../util/combineClasses"
-import { LoadingButton, LoadingButtonProps } from "../LoadingButton/LoadingButton"
+import {
+  LoadingButton,
+  LoadingButtonProps,
+} from "../LoadingButton/LoadingButton"
 import { ConfirmDialogType } from "./types"
-
-export interface DialogTitleProps {
-  /** Title for display */
-  title: React.ReactNode
-  /** Optional icon to display faded to the right of the title */
-  icon?: typeof SvgIcon
-  /** Smaller text to display above the title */
-  superTitle?: React.ReactNode
-}
-
-/**
- * Override of Material UI's DialogTitle that allows for a supertitle and background icon
- */
-export const DialogTitle: React.FC<DialogTitleProps> = ({ title, icon: Icon, superTitle }) => {
-  const styles = useTitleStyles()
-  return (
-    <MuiDialogTitle disableTypography>
-      <div className={styles.titleWrapper}>
-        {superTitle && <div className={styles.superTitle}>{superTitle}</div>}
-        <div className={styles.title}>{title}</div>
-      </div>
-      {Icon && <Icon className={styles.icon} />}
-    </MuiDialogTitle>
-  )
-}
-
-const useTitleStyles = makeStyles(
-  (theme) => ({
-    title: {
-      position: "relative",
-      zIndex: 2,
-      fontSize: theme.typography.h3.fontSize,
-      fontWeight: theme.typography.h3.fontWeight,
-      lineHeight: "40px",
-      display: "flex",
-      alignItems: "center",
-    },
-    superTitle: {
-      position: "relative",
-      zIndex: 2,
-      fontSize: theme.typography.body2.fontSize,
-      fontWeight: 500,
-      letterSpacing: 1.5,
-      textTransform: "uppercase",
-    },
-    titleWrapper: {
-      padding: `${theme.spacing(2)}px 0`,
-    },
-    icon: {
-      height: 84,
-      width: 84,
-      color: fade(theme.palette.action.disabled, 0.4),
-    },
-  }),
-  { name: "CdrDialogTitle" },
-)
 
 export interface DialogActionButtonsProps {
   /** Text to display in the cancel button */
@@ -72,6 +19,8 @@ export interface DialogActionButtonsProps {
   confirmLoading?: boolean
   /** Whether or not this is a confirm dialog */
   confirmDialog?: boolean
+  /** Whether or not the submit button is disabled */
+  disabled?: boolean
   /** Called when cancel is clicked */
   onCancel?: () => void
   /** Called when confirm is clicked */
@@ -94,6 +43,7 @@ export const DialogActionButtons: React.FC<DialogActionButtonsProps> = ({
   confirmText = "Confirm",
   confirmLoading = false,
   confirmDialog,
+  disabled = false,
   onCancel,
   onConfirm,
   type = "info",
@@ -122,6 +72,7 @@ export const DialogActionButtons: React.FC<DialogActionButtonsProps> = ({
           onClick={onConfirm}
           color={typeToColor(type)}
           loading={confirmLoading}
+          disabled={disabled}
           type="submit"
           className={combineClasses({
             [styles.dialogButton]: true,
@@ -151,27 +102,29 @@ const useButtonStyles = makeStyles((theme) => ({
     boxShadow: "none",
   },
   cancelButton: {
-    background: fade(theme.palette.primary.main, 0.1),
+    background: alpha(theme.palette.primary.main, 0.1),
     color: theme.palette.primary.main,
 
     "&:hover": {
-      background: fade(theme.palette.primary.main, 0.3),
+      background: alpha(theme.palette.primary.main, 0.3),
     },
   },
   confirmDialogCancelButton: (props: StyleProps) => {
     const color =
-      props.type === "info" ? theme.palette.primary.contrastText : theme.palette.error.contrastText
+      props.type === "info"
+        ? theme.palette.primary.contrastText
+        : theme.palette.error.contrastText
     return {
-      background: fade(color, 0.15),
+      background: alpha(color, 0.15),
       color,
 
       "&:hover": {
-        background: fade(color, 0.3),
+        background: alpha(color, 0.3),
       },
 
       "&.Mui-disabled": {
-        background: fade(color, 0.15),
-        color: fade(color, 0.5),
+        background: alpha(color, 0.15),
+        color: alpha(color, 0.5),
       },
     }
   },
@@ -210,7 +163,7 @@ const useButtonStyles = makeStyles((theme) => ({
       },
       "&.Mui-disabled": {
         backgroundColor: theme.palette.action.disabledBackground,
-        color: fade(theme.palette.text.disabled, 0.5),
+        color: alpha(theme.palette.text.disabled, 0.5),
       },
     },
 
@@ -218,7 +171,10 @@ const useButtonStyles = makeStyles((theme) => ({
       color: theme.palette.error.main,
       borderColor: theme.palette.error.main,
       "&:hover": {
-        backgroundColor: fade(theme.palette.error.main, theme.palette.action.hoverOpacity),
+        backgroundColor: alpha(
+          theme.palette.error.main,
+          theme.palette.action.hoverOpacity,
+        ),
         "@media (hover: none)": {
           backgroundColor: "transparent",
         },
@@ -227,7 +183,7 @@ const useButtonStyles = makeStyles((theme) => ({
         },
       },
       "&.Mui-disabled": {
-        color: fade(theme.palette.text.disabled, 0.5),
+        color: alpha(theme.palette.text.disabled, 0.5),
         borderColor: theme.palette.action.disabled,
       },
     },
@@ -235,13 +191,16 @@ const useButtonStyles = makeStyles((theme) => ({
     "&.MuiButton-text": {
       color: theme.palette.error.main,
       "&:hover": {
-        backgroundColor: fade(theme.palette.error.main, theme.palette.action.hoverOpacity),
+        backgroundColor: alpha(
+          theme.palette.error.main,
+          theme.palette.action.hoverOpacity,
+        ),
         "@media (hover: none)": {
           backgroundColor: "transparent",
         },
       },
       "&.Mui-disabled": {
-        color: fade(theme.palette.text.disabled, 0.5),
+        color: alpha(theme.palette.text.disabled, 0.5),
       },
     },
   },
@@ -260,7 +219,7 @@ const useButtonStyles = makeStyles((theme) => ({
       },
       "&.Mui-disabled": {
         backgroundColor: theme.palette.action.disabledBackground,
-        color: fade(theme.palette.text.disabled, 0.5),
+        color: alpha(theme.palette.text.disabled, 0.5),
       },
     },
 
@@ -268,7 +227,10 @@ const useButtonStyles = makeStyles((theme) => ({
       color: theme.palette.success.main,
       borderColor: theme.palette.success.main,
       "&:hover": {
-        backgroundColor: fade(theme.palette.success.main, theme.palette.action.hoverOpacity),
+        backgroundColor: alpha(
+          theme.palette.success.main,
+          theme.palette.action.hoverOpacity,
+        ),
         "@media (hover: none)": {
           backgroundColor: "transparent",
         },
@@ -277,7 +239,7 @@ const useButtonStyles = makeStyles((theme) => ({
         },
       },
       "&.Mui-disabled": {
-        color: fade(theme.palette.text.disabled, 0.5),
+        color: alpha(theme.palette.text.disabled, 0.5),
         borderColor: theme.palette.action.disabled,
       },
     },
@@ -285,13 +247,16 @@ const useButtonStyles = makeStyles((theme) => ({
     "&.MuiButton-text": {
       color: theme.palette.success.main,
       "&:hover": {
-        backgroundColor: fade(theme.palette.success.main, theme.palette.action.hoverOpacity),
+        backgroundColor: alpha(
+          theme.palette.success.main,
+          theme.palette.action.hoverOpacity,
+        ),
         "@media (hover: none)": {
           backgroundColor: "transparent",
         },
       },
       "&.Mui-disabled": {
-        color: fade(theme.palette.text.disabled, 0.5),
+        color: alpha(theme.palette.text.disabled, 0.5),
       },
     },
   },

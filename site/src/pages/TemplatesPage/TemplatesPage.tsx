@@ -1,26 +1,28 @@
-import { useActor, useMachine } from "@xstate/react"
-import React, { useContext } from "react"
+import { useMachine } from "@xstate/react"
+import { useOrganizationId } from "hooks/useOrganizationId"
+import { usePermissions } from "hooks/usePermissions"
+import { FC } from "react"
 import { Helmet } from "react-helmet-async"
 import { pageTitle } from "../../util/page"
-import { XServiceContext } from "../../xServices/StateContext"
 import { templatesMachine } from "../../xServices/templates/templatesXService"
 import { TemplatesPageView } from "./TemplatesPageView"
 
-const TemplatesPage: React.FC = () => {
-  const xServices = useContext(XServiceContext)
-  const [authState] = useActor(xServices.authXService)
-  const [templatesState] = useMachine(templatesMachine)
+export const TemplatesPage: FC = () => {
+  const organizationId = useOrganizationId()
+  const permissions = usePermissions()
+  const [templatesState] = useMachine(templatesMachine, {
+    context: {
+      organizationId,
+      permissions,
+    },
+  })
 
   return (
     <>
       <Helmet>
         <title>{pageTitle("Templates")}</title>
       </Helmet>
-      <TemplatesPageView
-        templates={templatesState.context.templates}
-        canCreateTemplate={authState.context.permissions?.createTemplates}
-        loading={templatesState.hasTag("loading")}
-      />
+      <TemplatesPageView context={templatesState.context} />
     </>
   )
 }

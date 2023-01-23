@@ -1,7 +1,8 @@
 {
+  "coder": "Coder",
   "workspaceStatus": {
     "loading": "Loading",
-    "started": "Running",
+    "running": "Running",
     "starting": "Starting",
     "stopping": "Stopping",
     "stopped": "Stopped",
@@ -10,6 +11,33 @@
     "canceling": "Canceling action",
     "canceled": "Canceled action",
     "failed": "Failed",
-    "queued": "Queued"
+    "pending": "Pending"
+  },
+  "deleteDialog": {
+    "title": "Delete {{entity}}",
+    "intro": "Deleting this {{entity}} is irreversible!",
+    "confirm": "Are you sure you want to proceed? Type the name of this {{entity}} below to confirm.",
+    "confirmLabel": "Name of {{entity}} to delete",
+    "incorrectName": "Incorrect {{entity}} name."
+  },
+  "schedule": {
+    "autoStartLabel": "Starts at",
+    "autoStopLabel": "Stops at"
+  },
+  "ctas": {
+    "dismissCta": "Dismiss",
+    "expand": "Click here to learn more",
+    "collapse": "Click here to hide",
+    "retry": "Retry"
+  },
+  "warningsAndErrors": {
+    "somethingWentWrong": "Something went wrong."
+  },
+  "emojiPicker": {
+    "select": "Select emoji"
+  },
+  "updateCheck": {
+    "message": "Coder {{version}} is now available. View the <4>release notes</4> and <7>upgrade instructions</7> for more information.",
+    "error": "Coder update check failed."
   }
 }

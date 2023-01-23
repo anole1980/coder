@@ -6,7 +6,7 @@ import { PasswordField } from "../PasswordField/PasswordField"
 /**
  * FormFieldProps are required props for creating form fields using a factory.
  */
-export interface FormFieldProps<T> {
+interface FormFieldProps<T> {
   /**
    * form is a reference to a form or subform and is used to compute common
    * states such as error and helper text
@@ -119,7 +119,8 @@ export const FormTextField = <T,>({
   variant = "outlined",
   ...rest
 }: FormTextFieldProps<T>): ReactElement => {
-  const isError = form.touched[formFieldName] && Boolean(form.errors[formFieldName])
+  const isError =
+    form.touched[formFieldName] && Boolean(form.errors[formFieldName])
 
   // Conversion to a string primitive is necessary as formFieldName is an in
   // indexable type such as a string, number or enum.
@@ -145,7 +146,10 @@ export const FormTextField = <T,>({
         }
 
         const event = e
-        if (typeof eventTransform !== "undefined" && typeof event.target.value === "string") {
+        if (
+          typeof eventTransform !== "undefined" &&
+          typeof event.target.value === "string"
+        ) {
           event.target.value = eventTransform(e.target.value)
         }
         form.handleChange(event)

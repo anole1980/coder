@@ -3,10 +3,16 @@ import dayjs from "dayjs"
 import advancedFormat from "dayjs/plugin/advancedFormat"
 import timezone from "dayjs/plugin/timezone"
 import utc from "dayjs/plugin/utc"
-import { defaultSchedule, emptySchedule } from "pages/WorkspaceSchedulePage/schedule"
-import { defaultTTL, emptyTTL } from "pages/WorkspaceSchedulePage/ttl"
+import {
+  defaultSchedule,
+  emptySchedule,
+} from "pages/WorkspaceSchedulePage/schedule"
+import { emptyTTL } from "pages/WorkspaceSchedulePage/ttl"
 import { makeMockApiError } from "testHelpers/entities"
-import { WorkspaceScheduleForm, WorkspaceScheduleFormProps } from "./WorkspaceScheduleForm"
+import {
+  WorkspaceScheduleForm,
+  WorkspaceScheduleFormProps,
+} from "./WorkspaceScheduleForm"
 
 dayjs.extend(advancedFormat)
 dayjs.extend(utc)
@@ -25,13 +31,15 @@ export default {
   },
 }
 
-const Template: Story<WorkspaceScheduleFormProps> = (args) => <WorkspaceScheduleForm {...args} />
+const Template: Story<WorkspaceScheduleFormProps> = (args) => (
+  <WorkspaceScheduleForm {...args} />
+)
 
 const defaultInitialValues = {
   autoStartEnabled: true,
   ...defaultSchedule(),
   autoStopEnabled: true,
-  ttl: defaultTTL,
+  ttl: 24,
 }
 
 export const AllDisabled = Template.bind({})

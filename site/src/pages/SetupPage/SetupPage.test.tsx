@@ -12,22 +12,20 @@ const fillForm = async ({
   username = "someuser",
   email = "someone@coder.com",
   password = "password",
-  organization = "Coder",
 }: {
   username?: string
   email?: string
   password?: string
-  organization?: string
 } = {}) => {
   const usernameField = screen.getByLabelText(PageViewLanguage.usernameLabel)
   const emailField = screen.getByLabelText(PageViewLanguage.emailLabel)
   const passwordField = screen.getByLabelText(PageViewLanguage.passwordLabel)
-  const organizationField = screen.getByLabelText(PageViewLanguage.organizationLabel)
-  await userEvent.type(organizationField, organization)
   await userEvent.type(usernameField, username)
   await userEvent.type(emailField, email)
   await userEvent.type(passwordField, password)
-  const submitButton = screen.getByRole("button", { name: PageViewLanguage.create })
+  const submitButton = screen.getByRole("button", {
+    name: PageViewLanguage.create,
+  })
   fireEvent.click(submitButton)
 }
 
@@ -55,7 +53,9 @@ describe("Setup Page", () => {
     })
     render(<SetupPage />)
     await fillForm()
-    const errorMessage = await screen.findByText(SetupLanguage.createFirstUserError)
+    const errorMessage = await screen.findByText(
+      SetupLanguage.createFirstUserError,
+    )
     expect(errorMessage).toBeDefined()
   })
 
@@ -94,6 +94,6 @@ describe("Setup Page", () => {
     )
 
     await fillForm()
-    await waitFor(() => expect(history.location.pathname).toEqual("/workspaces"))
+    await waitFor(() => expect(window.location).toBeAt("/workspaces"))
   })
 })

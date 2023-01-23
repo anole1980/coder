@@ -26,20 +26,23 @@ const (
 
 // Organization is the JSON representation of a Coder organization.
 type Organization struct {
-	ID        uuid.UUID `json:"id" validate:"required"`
+	ID        uuid.UUID `json:"id" validate:"required" format:"uuid"`
 	Name      string    `json:"name" validate:"required"`
-	CreatedAt time.Time `json:"created_at" validate:"required"`
-	UpdatedAt time.Time `json:"updated_at" validate:"required"`
+	CreatedAt time.Time `json:"created_at" validate:"required" format:"date-time"`
+	UpdatedAt time.Time `json:"updated_at" validate:"required" format:"date-time"`
 }
 
 // CreateTemplateVersionRequest enables callers to create a new Template Version.
 type CreateTemplateVersionRequest struct {
+	Name string `json:"name,omitempty" validate:"omitempty,template_name"`
 	// TemplateID optionally associates a version with a template.
-	TemplateID uuid.UUID `json:"template_id,omitempty"`
+	TemplateID      uuid.UUID                `json:"template_id,omitempty" format:"uuid"`
+	StorageMethod   ProvisionerStorageMethod `json:"storage_method" validate:"oneof=file,required" enums:"file"`
+	FileID          uuid.UUID                `json:"file_id,omitempty" validate:"required_without=ExampleID" format:"uuid"`
+	ExampleID       string                   `json:"example_id,omitempty" validate:"required_without=FileID"`
+	Provisioner     ProvisionerType          `json:"provisioner" validate:"oneof=terraform echo,required"`
+	ProvisionerTags map[string]string        `json:"tags"`
 
-	StorageMethod ProvisionerStorageMethod `json:"storage_method" validate:"oneof=file,required"`
-	StorageSource string                   `json:"storage_source" validate:"required"`
-	Provisioner   ProvisionerType          `json:"provisioner" validate:"oneof=terraform echo,required"`
 	// ParameterValues allows for additional parameters to be provided
 	// during the dry-run provision stage.
 	ParameterValues []CreateParameterRequest `json:"parameter_values,omitempty"`
@@ -49,6 +52,8 @@ type CreateTemplateVersionRequest struct {
 type CreateTemplateRequest struct {
 	// Name is the name of the template.
 	Name string `json:"name" validate:"template_name,required"`
+	// DisplayName is the displayed name of the template.
+	DisplayName string `json:"display_name,omitempty" validate:"template_display_name"`
 	// Description is a description of what the template contains. It must be
 	// less than 128 bytes.
 	Description string `json:"description,omitempty" validate:"lt=128"`
@@ -62,28 +67,28 @@ type CreateTemplateRequest struct {
 	// This is required on creation to enable a user-flow of validating a
 	// template works. There is no reason the data-model cannot support empty
 	// templates, but it doesn't make sense for users.
-	VersionID       uuid.UUID                `json:"template_version_id" validate:"required"`
+	VersionID       uuid.UUID                `json:"template_version_id" validate:"required" format:"uuid"`
 	ParameterValues []CreateParameterRequest `json:"parameter_values,omitempty"`
 
-	// MaxTTLMillis allows optionally specifying the maximum allowable TTL
+	// DefaultTTLMillis allows optionally specifying the default TTL
 	// for all workspaces created from this template.
-	MaxTTLMillis *int64 `json:"max_ttl_ms,omitempty"`
+	DefaultTTLMillis *int64 `json:"default_ttl_ms,omitempty"`
 
-	// MinAutostartIntervalMillis allows optionally specifying the minimum
-	// allowable duration between autostarts for all workspaces created from
-	// this template.
-	MinAutostartIntervalMillis *int64 `json:"min_autostart_interval_ms,omitempty"`
+	// Allow users to cancel in-progress workspace jobs.
+	// *bool as the default value is "true".
+	AllowUserCancelWorkspaceJobs *bool `json:"allow_user_cancel_workspace_jobs"`
 }
 
 // CreateWorkspaceRequest provides options for creating a new workspace.
 type CreateWorkspaceRequest struct {
-	TemplateID        uuid.UUID `json:"template_id" validate:"required"`
+	TemplateID        uuid.UUID `json:"template_id" validate:"required" format:"uuid"`
 	Name              string    `json:"name" validate:"workspace_name,required"`
 	AutostartSchedule *string   `json:"autostart_schedule"`
 	TTLMillis         *int64    `json:"ttl_ms,omitempty"`
 	// ParameterValues allows for additional parameters to be provided
 	// during the initial provision.
-	ParameterValues []CreateParameterRequest `json:"parameter_values,omitempty"`
+	ParameterValues     []CreateParameterRequest  `json:"parameter_values,omitempty"`
+	RichParameterValues []WorkspaceBuildParameter `json:"rich_parameter_values,omitempty"`
 }
 
 func (c *Client) Organization(ctx context.Context, id uuid.UUID) (Organization, error) {
@@ -133,6 +138,25 @@ func (c *Client) CreateTemplateVersion(ctx context.Context, organizationID uuid.
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusCreated {
+		return TemplateVersion{}, readBodyAsError(res)
+	}
+
+	var templateVersion TemplateVersion
+	return templateVersion, json.NewDecoder(res.Body).Decode(&templateVersion)
+}
+
+func (c *Client) TemplateVersionByOrganizationAndName(ctx context.Context, organizationID uuid.UUID, name string) (TemplateVersion, error) {
+	res, err := c.Request(ctx, http.MethodGet,
+		fmt.Sprintf("/api/v2/organizations/%s/templateversions/%s", organizationID.String(), name),
+		nil,
+	)
+
+	if err != nil {
+		return TemplateVersion{}, xerrors.Errorf("execute request: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
 		return TemplateVersion{}, readBodyAsError(res)
 	}
 
@@ -198,8 +222,8 @@ func (c *Client) TemplateByName(ctx context.Context, organizationID uuid.UUID, n
 }
 
 // CreateWorkspace creates a new workspace for the template specified.
-func (c *Client) CreateWorkspace(ctx context.Context, organizationID uuid.UUID, request CreateWorkspaceRequest) (Workspace, error) {
-	res, err := c.Request(ctx, http.MethodPost, fmt.Sprintf("/api/v2/organizations/%s/workspaces", organizationID), request)
+func (c *Client) CreateWorkspace(ctx context.Context, organizationID uuid.UUID, user string, request CreateWorkspaceRequest) (Workspace, error) {
+	res, err := c.Request(ctx, http.MethodPost, fmt.Sprintf("/api/v2/organizations/%s/members/%s/workspaces", organizationID, user), request)
 	if err != nil {
 		return Workspace{}, err
 	}

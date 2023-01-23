@@ -1,103 +1,76 @@
+import { Permissions } from "xServices/auth/authXService"
 import { assign, createMachine } from "xstate"
 import * as API from "../../api/api"
 import * as TypesGen from "../../api/typesGenerated"
 
-interface TemplatesContext {
-  organizations?: TypesGen.Organization[]
+export interface TemplatesContext {
+  organizationId: string
+  permissions: Permissions
   templates?: TypesGen.Template[]
-  canCreateTemplate?: boolean
-  permissionsError?: Error | unknown
-  organizationsError?: Error | unknown
-  templatesError?: Error | unknown
+  examples?: TypesGen.TemplateExample[]
+  error?: Error | unknown
 }
 
 export const templatesMachine = createMachine(
   {
+    id: "templatesState",
+    predictableActionArguments: true,
     tsTypes: {} as import("./templatesXService.typegen").Typegen0,
     schema: {
       context: {} as TemplatesContext,
       services: {} as {
-        getOrganizations: {
-          data: TypesGen.Organization[]
-        }
-        getPermissions: {
-          data: boolean
-        }
-        getTemplates: {
-          data: TypesGen.Template[]
+        load: {
+          data: {
+            templates: TypesGen.Template[]
+            examples: TypesGen.TemplateExample[]
+          }
         }
       },
     },
-    id: "templatesState",
-    initial: "gettingOrganizations",
+    initial: "loading",
     states: {
-      gettingOrganizations: {
-        entry: "clearOrganizationsError",
+      loading: {
         invoke: {
-          src: "getOrganizations",
-          id: "getOrganizations",
-          onDone: [
-            {
-              actions: ["assignOrganizations", "clearOrganizationsError"],
-              target: "gettingTemplates",
-            },
-          ],
-          onError: [
-            {
-              actions: "assignOrganizationsError",
-              target: "error",
-            },
-          ],
-        },
-        tags: "loading",
-      },
-      gettingTemplates: {
-        entry: "clearTemplatesError",
-        invoke: {
-          src: "getTemplates",
-          id: "getTemplates",
+          src: "load",
+          id: "load",
           onDone: {
-            target: "done",
-            actions: ["assignTemplates", "clearTemplatesError"],
+            actions: ["assignData"],
+            target: "idle",
           },
           onError: {
-            target: "error",
-            actions: "assignTemplatesError",
+            actions: "assignError",
+            target: "idle",
           },
         },
-        tags: "loading",
       },
-      done: {},
-      error: {},
+      idle: {
+        type: "final",
+      },
     },
   },
   {
     actions: {
-      assignOrganizations: assign({
-        organizations: (_, event) => event.data,
+      assignData: assign({
+        templates: (_, event) => event.data.templates,
+        examples: (_, event) => event.data.examples,
       }),
-      assignOrganizationsError: assign({
-        organizationsError: (_, event) => event.data,
+      assignError: assign({
+        error: (_, { data }) => data,
       }),
-      clearOrganizationsError: assign((context) => ({
-        ...context,
-        organizationsError: undefined,
-      })),
-      assignTemplates: assign({
-        templates: (_, event) => event.data,
-      }),
-      assignTemplatesError: assign({
-        templatesError: (_, event) => event.data,
-      }),
-      clearTemplatesError: (context) => assign({ ...context, getWorkspacesError: undefined }),
     },
     services: {
-      getOrganizations: API.getOrganizations,
-      getTemplates: async (context) => {
-        if (!context.organizations || context.organizations.length === 0) {
-          throw new Error("no organizations")
+      load: async ({ organizationId, permissions }) => {
+        const [templates, examples] = await Promise.all([
+          API.getTemplates(organizationId),
+          permissions.createTemplates
+            ? API.getTemplateExamples(organizationId)
+            : Promise.resolve([]),
+        ])
+
+        return {
+          templates,
+          examples,
         }
-        return API.getTemplates(context.organizations[0].id)
       },
     },
   },

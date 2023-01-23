@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,8 +23,6 @@ import (
 	gosshagent "golang.org/x/crypto/ssh/agent"
 	"golang.org/x/term"
 	"golang.org/x/xerrors"
-
-	"cdr.dev/slog"
 
 	"github.com/coder/coder/agent"
 	"github.com/coder/coder/cli/cliflag"
@@ -41,14 +43,14 @@ func ssh() *cobra.Command {
 		stdio          bool
 		shuffle        bool
 		forwardAgent   bool
+		forwardGPG     bool
 		identityAgent  string
 		wsPollInterval time.Duration
-		wireguard      bool
 	)
 	cmd := &cobra.Command{
 		Annotations: workspaceCommand,
 		Use:         "ssh <workspace>",
-		Short:       "SSH into a workspace",
+		Short:       "Start a shell into a workspace",
 		Args:        cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithCancel(cmd.Context())
@@ -76,6 +78,11 @@ func ssh() *cobra.Command {
 				return err
 			}
 
+			updateWorkspaceBanner, outdated := verifyWorkspaceOutdated(client, workspace)
+			if outdated && isTTYErr(cmd) {
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), updateWorkspaceBanner)
+			}
+
 			// OpenSSH passes stderr directly to the calling TTY.
 			// This is required in "stdio" mode so a connecting indicator can be displayed.
 			err = cliui.Agent(ctx, cmd.ErrOrStderr(), cliui.AgentOptions{
@@ -88,22 +95,17 @@ func ssh() *cobra.Command {
 				return xerrors.Errorf("await agent: %w", err)
 			}
 
-			var conn agent.Conn
-			if !wireguard {
-				conn, err = client.DialWorkspaceAgent(ctx, workspaceAgent.ID, nil)
-			} else {
-				conn, err = client.DialWorkspaceAgentTailnet(ctx, slog.Logger{}, workspaceAgent.ID)
-			}
+			conn, err := client.DialWorkspaceAgent(ctx, workspaceAgent.ID, &codersdk.DialWorkspaceAgentOptions{})
 			if err != nil {
 				return err
 			}
 			defer conn.Close()
-
+			conn.AwaitReachable(ctx)
 			stopPolling := tryPollWorkspaceAutostop(ctx, client, workspace)
 			defer stopPolling()
 
 			if stdio {
-				rawSSH, err := conn.SSH()
+				rawSSH, err := conn.SSH(ctx)
 				if err != nil {
 					return err
 				}
@@ -116,7 +118,7 @@ func ssh() *cobra.Command {
 				return nil
 			}
 
-			sshClient, err := conn.SSHClient()
+			sshClient, err := conn.SSHClient(ctx)
 			if err != nil {
 				return err
 			}
@@ -141,12 +143,28 @@ func ssh() *cobra.Command {
 			if forwardAgent && identityAgent != "" {
 				err = gosshagent.ForwardToRemote(sshClient, identityAgent)
 				if err != nil {
-					return xerrors.Errorf("forward agent failed: %w", err)
+					return xerrors.Errorf("forward agent: %w", err)
 				}
 				err = gosshagent.RequestAgentForwarding(sshSession)
 				if err != nil {
 					return xerrors.Errorf("request agent forwarding failed: %w", err)
 				}
+			}
+
+			if forwardGPG {
+				if workspaceAgent.OperatingSystem == "windows" {
+					return xerrors.New("GPG forwarding is not supported for Windows workspaces")
+				}
+
+				err = uploadGPGKeys(ctx, sshClient)
+				if err != nil {
+					return xerrors.Errorf("upload GPG public keys and ownertrust to workspace: %w", err)
+				}
+				closer, err := forwardGPGAgent(ctx, cmd.ErrOrStderr(), sshClient)
+				if err != nil {
+					return xerrors.Errorf("forward GPG socket: %w", err)
+				}
+				defer closer.Close()
 			}
 
 			stdoutFile, validOut := cmd.OutOrStdout().(*os.File)
@@ -202,10 +220,12 @@ func ssh() *cobra.Command {
 					_ = sshSession.WindowChange(height, width)
 				}
 			}
+
 			err = sshSession.Wait()
 			if err != nil {
-				// If the connection drops unexpectedly, we get an ExitMissingError but no other
-				// error details, so try to at least give the user a better message
+				// If the connection drops unexpectedly, we get an
+				// ExitMissingError but no other error details, so try to at
+				// least give the user a better message
 				if errors.Is(err, &gossh.ExitMissingError{}) {
 					return xerrors.New("SSH connection ended unexpectedly")
 				}
@@ -219,11 +239,9 @@ func ssh() *cobra.Command {
 	cliflag.BoolVarP(cmd.Flags(), &shuffle, "shuffle", "", "CODER_SSH_SHUFFLE", false, "Specifies whether to choose a random workspace")
 	_ = cmd.Flags().MarkHidden("shuffle")
 	cliflag.BoolVarP(cmd.Flags(), &forwardAgent, "forward-agent", "A", "CODER_SSH_FORWARD_AGENT", false, "Specifies whether to forward the SSH agent specified in $SSH_AUTH_SOCK")
+	cliflag.BoolVarP(cmd.Flags(), &forwardGPG, "forward-gpg", "G", "CODER_SSH_FORWARD_GPG", false, "Specifies whether to forward the GPG agent. Unsupported on Windows workspaces, but supports all clients. Requires gnupg (gpg, gpgconf) on both the client and workspace. The GPG agent must already be running locally and will not be started for you. If a GPG agent is already running in the workspace, it will be attempted to be killed.")
 	cliflag.StringVarP(cmd.Flags(), &identityAgent, "identity-agent", "", "CODER_SSH_IDENTITY_AGENT", "", "Specifies which identity agent to use (overrides $SSH_AUTH_SOCK), forward agent must also be enabled")
 	cliflag.DurationVarP(cmd.Flags(), &wsPollInterval, "workspace-poll-interval", "", "CODER_WORKSPACE_POLL_INTERVAL", workspacePollInterval, "Specifies how often to poll for workspace automated shutdown.")
-	cliflag.BoolVarP(cmd.Flags(), &wireguard, "wireguard", "", "CODER_SSH_WIREGUARD", false, "Whether to use Wireguard for SSH tunneling.")
-	_ = cmd.Flags().MarkHidden("wireguard")
-
 	return cmd
 }
 
@@ -237,17 +255,17 @@ func getWorkspaceAndAgent(ctx context.Context, cmd *cobra.Command, client *coder
 		err            error
 	)
 	if shuffle {
-		workspaces, err := client.Workspaces(ctx, codersdk.WorkspaceFilter{
-			Owner: codersdk.Me,
+		res, err := client.Workspaces(ctx, codersdk.WorkspaceFilter{
+			Owner: userID,
 		})
 		if err != nil {
 			return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, err
 		}
-		if len(workspaces) == 0 {
+		if len(res.Workspaces) == 0 {
 			return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, xerrors.New("no workspaces to shuffle")
 		}
 
-		workspace, err = cryptorand.Element(workspaces)
+		workspace, err = cryptorand.Element(res.Workspaces)
 		if err != nil {
 			return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, err
 		}
@@ -262,7 +280,7 @@ func getWorkspaceAndAgent(ctx context.Context, cmd *cobra.Command, client *coder
 		return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, xerrors.New("workspace must be in start transition to ssh")
 	}
 	if workspace.LatestBuild.Job.CompletedAt == nil {
-		err := cliui.WorkspaceBuild(ctx, cmd.ErrOrStderr(), client, workspace.LatestBuild.ID, workspace.CreatedAt)
+		err := cliui.WorkspaceBuild(ctx, cmd.ErrOrStderr(), client, workspace.LatestBuild.ID)
 		if err != nil {
 			return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, err
 		}
@@ -271,10 +289,7 @@ func getWorkspaceAndAgent(ctx context.Context, cmd *cobra.Command, client *coder
 		return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, xerrors.Errorf("workspace %q is being deleted", workspace.Name)
 	}
 
-	resources, err := client.WorkspaceResourcesByBuild(ctx, workspace.LatestBuild.ID)
-	if err != nil {
-		return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, xerrors.Errorf("fetch workspace resources: %w", err)
-	}
+	resources := workspace.LatestBuild.Resources
 
 	agents := make([]codersdk.WorkspaceAgent, 0)
 	for _, resource := range resources {
@@ -357,4 +372,200 @@ func notifyCondition(ctx context.Context, client *codersdk.Client, workspaceID u
 		}
 		return deadline.Truncate(time.Minute), callback
 	}
+}
+
+// Verify if the user workspace is outdated and prepare an actionable message for user.
+func verifyWorkspaceOutdated(client *codersdk.Client, workspace codersdk.Workspace) (string, bool) {
+	if !workspace.Outdated {
+		return "", false // workspace is up-to-date
+	}
+
+	workspaceLink := buildWorkspaceLink(client.URL, workspace)
+	return fmt.Sprintf("👋 Your workspace is outdated! Update it here: %s\n", workspaceLink), true
+}
+
+// Build the user workspace link which navigates to the Coder web UI.
+func buildWorkspaceLink(serverURL *url.URL, workspace codersdk.Workspace) *url.URL {
+	return serverURL.ResolveReference(&url.URL{Path: fmt.Sprintf("@%s/%s", workspace.OwnerName, workspace.Name)})
+}
+
+// runLocal runs a command on the local machine.
+func runLocal(ctx context.Context, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = stdin
+
+	out, err := cmd.Output()
+	if err != nil {
+		var stderr []byte
+		if exitErr := new(exec.ExitError); errors.As(err, &exitErr) {
+			stderr = exitErr.Stderr
+		}
+
+		return out, xerrors.Errorf(
+			"`%s %s` failed: stderr: %s\n\nstdout: %s\n\n%w",
+			name,
+			strings.Join(args, " "),
+			bytes.TrimSpace(stderr),
+			bytes.TrimSpace(out),
+			err,
+		)
+	}
+
+	return out, nil
+}
+
+// runRemoteSSH runs a command on a remote machine/workspace via SSH.
+func runRemoteSSH(sshClient *gossh.Client, stdin io.Reader, cmd string) ([]byte, error) {
+	sess, err := sshClient.NewSession()
+	if err != nil {
+		return nil, xerrors.Errorf("create SSH session")
+	}
+	defer sess.Close()
+
+	stderr := bytes.NewBuffer(nil)
+	sess.Stdin = stdin
+	sess.Stderr = stderr
+
+	out, err := sess.Output(cmd)
+	if err != nil {
+		return out, xerrors.Errorf(
+			"`%s` failed: stderr: %s\n\nstdout: %s:\n\n%w",
+			cmd,
+			bytes.TrimSpace(stderr.Bytes()),
+			bytes.TrimSpace(out),
+			err,
+		)
+	}
+
+	return out, nil
+}
+
+func uploadGPGKeys(ctx context.Context, sshClient *gossh.Client) error {
+	// Check if the agent is running in the workspace already.
+	//
+	// Note: we don't support windows in the workspace for GPG forwarding so
+	//       using shell commands is fine.
+	//
+	// Note: we sleep after killing the agent because it doesn't always die
+	//       immediately.
+	agentSocketBytes, err := runRemoteSSH(sshClient, nil, `
+set -eux
+agent_socket=$(gpgconf --list-dir agent-socket)
+echo "$agent_socket"
+if [ -S "$agent_socket" ]; then
+  echo "agent socket exists, attempting to kill it" >&2
+  gpgconf --kill gpg-agent
+  rm -f "$agent_socket"
+  sleep 1
+fi
+
+test ! -S "$agent_socket"
+`)
+	agentSocket := strings.TrimSpace(string(agentSocketBytes))
+	if err != nil {
+		return xerrors.Errorf("check if agent socket is running (check if %q exists): %w", agentSocket, err)
+	}
+	if agentSocket == "" {
+		return xerrors.Errorf("agent socket path is empty, check the output of `gpgconf --list-dir agent-socket`")
+	}
+
+	// Read the user's public keys and ownertrust from GPG.
+	pubKeyExport, err := runLocal(ctx, nil, "gpg", "--armor", "--export")
+	if err != nil {
+		return xerrors.Errorf("export local public keys from GPG: %w", err)
+	}
+	ownerTrustExport, err := runLocal(ctx, nil, "gpg", "--export-ownertrust")
+	if err != nil {
+		return xerrors.Errorf("export local ownertrust from GPG: %w", err)
+	}
+
+	// Import the public keys and ownertrust into the workspace.
+	_, err = runRemoteSSH(sshClient, bytes.NewReader(pubKeyExport), "gpg --import")
+	if err != nil {
+		return xerrors.Errorf("import public keys into workspace: %w", err)
+	}
+	_, err = runRemoteSSH(sshClient, bytes.NewReader(ownerTrustExport), "gpg --import-ownertrust")
+	if err != nil {
+		return xerrors.Errorf("import ownertrust into workspace: %w", err)
+	}
+
+	// Kill the agent in the workspace if it was started by one of the above
+	// commands.
+	_, err = runRemoteSSH(sshClient, nil, fmt.Sprintf("gpgconf --kill gpg-agent && rm -f %q", agentSocket))
+	if err != nil {
+		return xerrors.Errorf("kill existing agent in workspace: %w", err)
+	}
+
+	return nil
+}
+
+func localGPGExtraSocket(ctx context.Context) (string, error) {
+	localSocket, err := runLocal(ctx, nil, "gpgconf", "--list-dir", "agent-extra-socket")
+	if err != nil {
+		return "", xerrors.Errorf("get local GPG agent socket: %w", err)
+	}
+
+	return string(bytes.TrimSpace(localSocket)), nil
+}
+
+func remoteGPGAgentSocket(sshClient *gossh.Client) (string, error) {
+	remoteSocket, err := runRemoteSSH(sshClient, nil, "gpgconf --list-dir agent-socket")
+	if err != nil {
+		return "", xerrors.Errorf("get remote GPG agent socket: %w", err)
+	}
+
+	return string(bytes.TrimSpace(remoteSocket)), nil
+}
+
+// cookieAddr is a special net.Addr accepted by sshForward() which includes a
+// cookie which is written to the connection before forwarding.
+type cookieAddr struct {
+	net.Addr
+	cookie []byte
+}
+
+// sshForwardRemote starts forwarding connections from a remote listener to a
+// local address via SSH in a goroutine.
+//
+// Accepts a `cookieAddr` as the local address.
+func sshForwardRemote(ctx context.Context, stderr io.Writer, sshClient *gossh.Client, localAddr, remoteAddr net.Addr) (io.Closer, error) {
+	listener, err := sshClient.Listen(remoteAddr.Network(), remoteAddr.String())
+	if err != nil {
+		return nil, xerrors.Errorf("listen on remote SSH address %s: %w", remoteAddr.String(), err)
+	}
+
+	go func() {
+		for {
+			remoteConn, err := listener.Accept()
+			if err != nil {
+				if ctx.Err() == nil {
+					_, _ = fmt.Fprintf(stderr, "Accept SSH listener connection: %+v\n", err)
+				}
+				return
+			}
+
+			go func() {
+				defer remoteConn.Close()
+
+				localConn, err := net.Dial(localAddr.Network(), localAddr.String())
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "Dial local address %s: %+v\n", localAddr.String(), err)
+					return
+				}
+				defer localConn.Close()
+
+				if c, ok := localAddr.(cookieAddr); ok {
+					_, err = localConn.Write(c.cookie)
+					if err != nil {
+						_, _ = fmt.Fprintf(stderr, "Write cookie to local connection: %+v\n", err)
+						return
+					}
+				}
+
+				agent.Bicopy(ctx, localConn, remoteConn)
+			}()
+		}
+	}()
+
+	return listener, nil
 }

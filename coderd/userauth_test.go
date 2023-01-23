@@ -3,11 +3,11 @@ package coderd_test
 import (
 	"context"
 	"crypto"
-	"crypto/rand"
-	"crypto/rsa"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +21,7 @@ import (
 
 	"github.com/coder/coder/coderd"
 	"github.com/coder/coder/coderd/coderdtest"
+	"github.com/coder/coder/coderd/database"
 	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/testutil"
 )
@@ -38,12 +39,31 @@ func (o *oauth2Config) Exchange(context.Context, string, ...oauth2.AuthCodeOptio
 		return o.token, nil
 	}
 	return &oauth2.Token{
-		AccessToken: "token",
+		AccessToken:  "token",
+		RefreshToken: "refresh",
+		Expiry:       database.Now().Add(time.Hour),
 	}, nil
 }
 
-func (*oauth2Config) TokenSource(context.Context, *oauth2.Token) oauth2.TokenSource {
-	return nil
+func (o *oauth2Config) TokenSource(context.Context, *oauth2.Token) oauth2.TokenSource {
+	return &oauth2TokenSource{
+		token: o.token,
+	}
+}
+
+type oauth2TokenSource struct {
+	token *oauth2.Token
+}
+
+func (o *oauth2TokenSource) Token() (*oauth2.Token, error) {
+	if o.token != nil {
+		return o.token, nil
+	}
+	return &oauth2.Token{
+		AccessToken:  "token",
+		RefreshToken: "refresh",
+		Expiry:       database.Now().Add(time.Hour),
+	}, nil
 }
 
 func TestUserAuthMethods(t *testing.T) {
@@ -79,6 +99,10 @@ func TestUserAuthMethods(t *testing.T) {
 // nolint:bodyclose
 func TestUserOAuth2Github(t *testing.T) {
 	t.Parallel()
+
+	stateActive := "active"
+	statePending := "pending"
+
 	t.Run("NotInAllowedOrganization", func(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, &coderdtest.Options{
@@ -86,6 +110,7 @@ func TestUserOAuth2Github(t *testing.T) {
 				OAuth2Config: &oauth2Config{},
 				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
 					return []*github.Membership{{
+						State: &stateActive,
 						Organization: &github.Organization{
 							Login: github.String("kyle"),
 						},
@@ -106,6 +131,7 @@ func TestUserOAuth2Github(t *testing.T) {
 				OAuth2Config:       &oauth2Config{},
 				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
 					return []*github.Membership{{
+						State: &stateActive,
 						Organization: &github.Organization{
 							Login: github.String("coder"),
 						},
@@ -132,6 +158,7 @@ func TestUserOAuth2Github(t *testing.T) {
 				AllowOrganizations: []string{"coder"},
 				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
 					return []*github.Membership{{
+						State: &stateActive,
 						Organization: &github.Organization{
 							Login: github.String("coder"),
 						},
@@ -150,7 +177,7 @@ func TestUserOAuth2Github(t *testing.T) {
 		})
 		_ = coderdtest.CreateFirstUser(t, client)
 		resp := oauth2Callback(t, client)
-		require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
 	t.Run("BlockSignups", func(t *testing.T) {
 		t.Parallel()
@@ -160,6 +187,7 @@ func TestUserOAuth2Github(t *testing.T) {
 				AllowOrganizations: []string{"coder"},
 				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
 					return []*github.Membership{{
+						State: &stateActive,
 						Organization: &github.Organization{
 							Login: github.String("coder"),
 						},
@@ -188,6 +216,7 @@ func TestUserOAuth2Github(t *testing.T) {
 				AllowOrganizations: []string{"coder"},
 				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
 					return []*github.Membership{{
+						State: &stateActive,
 						Organization: &github.Organization{
 							Login: github.String("coder"),
 						},
@@ -221,6 +250,7 @@ func TestUserOAuth2Github(t *testing.T) {
 				AllowSignups:       true,
 				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
 					return []*github.Membership{{
+						State: &stateActive,
 						Organization: &github.Organization{
 							Login: github.String("coder"),
 						},
@@ -245,7 +275,7 @@ func TestUserOAuth2Github(t *testing.T) {
 		resp := oauth2Callback(t, client)
 		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
 
-		client.SessionToken = resp.Cookies()[0].Value
+		client.SetSessionToken(authCookieValue(resp.Cookies()))
 		user, err := client.User(context.Background(), "me")
 		require.NoError(t, err)
 		require.Equal(t, "kyle@coder.com", user.Email)
@@ -262,6 +292,7 @@ func TestUserOAuth2Github(t *testing.T) {
 				OAuth2Config:       &oauth2Config{},
 				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
 					return []*github.Membership{{
+						State: &stateActive,
 						Organization: &github.Organization{
 							Login: github.String("coder"),
 						},
@@ -287,6 +318,160 @@ func TestUserOAuth2Github(t *testing.T) {
 		resp := oauth2Callback(t, client)
 		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
 	})
+	t.Run("SignupAllowedTeamInFirstOrganization", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, &coderdtest.Options{
+			GithubOAuth2Config: &coderd.GithubOAuth2Config{
+				AllowSignups:       true,
+				AllowOrganizations: []string{"coder", "nil"},
+				AllowTeams:         []coderd.GithubOAuth2Team{{"coder", "backend"}},
+				OAuth2Config:       &oauth2Config{},
+				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
+					return []*github.Membership{
+						{
+							State: &stateActive,
+							Organization: &github.Organization{
+								Login: github.String("coder"),
+							},
+						},
+						{
+							State: &stateActive,
+							Organization: &github.Organization{
+								Login: github.String("nil"),
+							},
+						},
+					}, nil
+				},
+				TeamMembership: func(ctx context.Context, client *http.Client, org, team, username string) (*github.Membership, error) {
+					return &github.Membership{}, nil
+				},
+				AuthenticatedUser: func(ctx context.Context, client *http.Client) (*github.User, error) {
+					return &github.User{
+						Login: github.String("mathias"),
+					}, nil
+				},
+				ListEmails: func(ctx context.Context, client *http.Client) ([]*github.UserEmail, error) {
+					return []*github.UserEmail{{
+						Email:    github.String("mathias@coder.com"),
+						Verified: github.Bool(true),
+						Primary:  github.Bool(true),
+					}}, nil
+				},
+			},
+		})
+		resp := oauth2Callback(t, client)
+		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+	})
+	t.Run("SignupAllowedTeamInSecondOrganization", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, &coderdtest.Options{
+			GithubOAuth2Config: &coderd.GithubOAuth2Config{
+				AllowSignups:       true,
+				AllowOrganizations: []string{"coder", "nil"},
+				AllowTeams:         []coderd.GithubOAuth2Team{{"nil", "null"}},
+				OAuth2Config:       &oauth2Config{},
+				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
+					return []*github.Membership{
+						{
+							State: &stateActive,
+							Organization: &github.Organization{
+								Login: github.String("coder"),
+							},
+						},
+						{
+							State: &stateActive,
+							Organization: &github.Organization{
+								Login: github.String("nil"),
+							},
+						},
+					}, nil
+				},
+				TeamMembership: func(ctx context.Context, client *http.Client, org, team, username string) (*github.Membership, error) {
+					return &github.Membership{}, nil
+				},
+				AuthenticatedUser: func(ctx context.Context, client *http.Client) (*github.User, error) {
+					return &github.User{
+						Login: github.String("mathias"),
+					}, nil
+				},
+				ListEmails: func(ctx context.Context, client *http.Client) ([]*github.UserEmail, error) {
+					return []*github.UserEmail{{
+						Email:    github.String("mathias@coder.com"),
+						Verified: github.Bool(true),
+						Primary:  github.Bool(true),
+					}}, nil
+				},
+			},
+		})
+		resp := oauth2Callback(t, client)
+		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+	})
+	t.Run("SignupAllowEveryone", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, &coderdtest.Options{
+			GithubOAuth2Config: &coderd.GithubOAuth2Config{
+				AllowSignups:  true,
+				AllowEveryone: true,
+				OAuth2Config:  &oauth2Config{},
+				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
+					return []*github.Membership{}, nil
+				},
+				TeamMembership: func(ctx context.Context, client *http.Client, org, team, username string) (*github.Membership, error) {
+					return nil, xerrors.New("no teams")
+				},
+				AuthenticatedUser: func(ctx context.Context, client *http.Client) (*github.User, error) {
+					return &github.User{
+						Login: github.String("mathias"),
+					}, nil
+				},
+				ListEmails: func(ctx context.Context, client *http.Client) ([]*github.UserEmail, error) {
+					return []*github.UserEmail{{
+						Email:    github.String("mathias@coder.com"),
+						Verified: github.Bool(true),
+						Primary:  github.Bool(true),
+					}}, nil
+				},
+			},
+		})
+		resp := oauth2Callback(t, client)
+		require.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+	})
+	t.Run("SignupFailedInactiveInOrg", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, &coderdtest.Options{
+			GithubOAuth2Config: &coderd.GithubOAuth2Config{
+				AllowSignups:       true,
+				AllowOrganizations: []string{"coder"},
+				AllowTeams:         []coderd.GithubOAuth2Team{{"coder", "frontend"}},
+				OAuth2Config:       &oauth2Config{},
+				ListOrganizationMemberships: func(ctx context.Context, client *http.Client) ([]*github.Membership, error) {
+					return []*github.Membership{{
+						State: &statePending,
+						Organization: &github.Organization{
+							Login: github.String("coder"),
+						},
+					}}, nil
+				},
+				TeamMembership: func(ctx context.Context, client *http.Client, org, team, username string) (*github.Membership, error) {
+					return &github.Membership{}, nil
+				},
+				AuthenticatedUser: func(ctx context.Context, client *http.Client) (*github.User, error) {
+					return &github.User{
+						Login: github.String("kyle"),
+					}, nil
+				},
+				ListEmails: func(ctx context.Context, client *http.Client) ([]*github.UserEmail, error) {
+					return []*github.UserEmail{{
+						Email:    github.String("kyle@coder.com"),
+						Verified: github.Bool(true),
+						Primary:  github.Bool(true),
+					}}, nil
+				},
+			},
+		})
+		resp := oauth2Callback(t, client)
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
 }
 
 // nolint:bodyclose
@@ -294,16 +479,18 @@ func TestUserOIDC(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		Name         string
-		Claims       jwt.MapClaims
-		AllowSignups bool
-		EmailDomain  string
-		Username     string
-		AvatarURL    string
-		StatusCode   int
+		Name                string
+		IDTokenClaims       jwt.MapClaims
+		UserInfoClaims      jwt.MapClaims
+		AllowSignups        bool
+		EmailDomain         []string
+		Username            string
+		AvatarURL           string
+		StatusCode          int
+		IgnoreEmailVerified bool
 	}{{
 		Name: "EmailOnly",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email": "kyle@kwc.io",
 		},
 		AllowSignups: true,
@@ -311,36 +498,67 @@ func TestUserOIDC(t *testing.T) {
 		Username:     "kyle",
 	}, {
 		Name: "EmailNotVerified",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@kwc.io",
 			"email_verified": false,
 		},
 		AllowSignups: true,
 		StatusCode:   http.StatusForbidden,
 	}, {
+		Name: "EmailNotAString",
+		IDTokenClaims: jwt.MapClaims{
+			"email":          3.14159,
+			"email_verified": false,
+		},
+		AllowSignups: true,
+		StatusCode:   http.StatusBadRequest,
+	}, {
+		Name: "EmailNotVerifiedIgnored",
+		IDTokenClaims: jwt.MapClaims{
+			"email":          "kyle@kwc.io",
+			"email_verified": false,
+		},
+		AllowSignups:        true,
+		StatusCode:          http.StatusTemporaryRedirect,
+		Username:            "kyle",
+		IgnoreEmailVerified: true,
+	}, {
 		Name: "NotInRequiredEmailDomain",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@kwc.io",
 			"email_verified": true,
 		},
 		AllowSignups: true,
-		EmailDomain:  "coder.com",
-		StatusCode:   http.StatusForbidden,
+		EmailDomain: []string{
+			"coder.com",
+		},
+		StatusCode: http.StatusForbidden,
 	}, {
-		Name:         "EmptyClaims",
-		Claims:       jwt.MapClaims{},
+		Name: "EmailDomainCaseInsensitive",
+		IDTokenClaims: jwt.MapClaims{
+			"email":          "kyle@KWC.io",
+			"email_verified": true,
+		},
 		AllowSignups: true,
-		StatusCode:   http.StatusBadRequest,
+		EmailDomain: []string{
+			"kwc.io",
+		},
+		StatusCode: http.StatusTemporaryRedirect,
+	}, {
+		Name:          "EmptyClaims",
+		IDTokenClaims: jwt.MapClaims{},
+		AllowSignups:  true,
+		StatusCode:    http.StatusBadRequest,
 	}, {
 		Name: "NoSignups",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@kwc.io",
 			"email_verified": true,
 		},
 		StatusCode: http.StatusForbidden,
 	}, {
 		Name: "UsernameFromEmail",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":          "kyle@kwc.io",
 			"email_verified": true,
 		},
@@ -349,7 +567,7 @@ func TestUserOIDC(t *testing.T) {
 		StatusCode:   http.StatusTemporaryRedirect,
 	}, {
 		Name: "UsernameFromClaims",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":              "kyle@kwc.io",
 			"email_verified":     true,
 			"preferred_username": "hotdog",
@@ -361,7 +579,7 @@ func TestUserOIDC(t *testing.T) {
 		// Services like Okta return the email as the username:
 		// https://developer.okta.com/docs/reference/api/oidc/#base-claims-always-present
 		Name: "UsernameAsEmail",
-		Claims: jwt.MapClaims{
+		IDTokenClaims: jwt.MapClaims{
 			"email":              "kyle@kwc.io",
 			"email_verified":     true,
 			"preferred_username": "kyle@kwc.io",
@@ -370,14 +588,37 @@ func TestUserOIDC(t *testing.T) {
 		AllowSignups: true,
 		StatusCode:   http.StatusTemporaryRedirect,
 	}, {
-		Name: "WithPicture",
-		Claims: jwt.MapClaims{
-			"email":          "kyle@kwc.io",
-			"email_verified": true,
-			"username":       "kyle",
-			"picture":        "/example.png",
+		// See: https://github.com/coder/coder/issues/4472
+		Name: "UsernameIsEmail",
+		IDTokenClaims: jwt.MapClaims{
+			"preferred_username": "kyle@kwc.io",
 		},
 		Username:     "kyle",
+		AllowSignups: true,
+		StatusCode:   http.StatusTemporaryRedirect,
+	}, {
+		Name: "WithPicture",
+		IDTokenClaims: jwt.MapClaims{
+			"email":              "kyle@kwc.io",
+			"email_verified":     true,
+			"preferred_username": "kyle",
+			"picture":            "/example.png",
+		},
+		Username:     "kyle",
+		AllowSignups: true,
+		AvatarURL:    "/example.png",
+		StatusCode:   http.StatusTemporaryRedirect,
+	}, {
+		Name: "WithUserInfoClaims",
+		IDTokenClaims: jwt.MapClaims{
+			"email":          "kyle@kwc.io",
+			"email_verified": true,
+		},
+		UserInfoClaims: jwt.MapClaims{
+			"preferred_username": "potato",
+			"picture":            "/example.png",
+		},
+		Username:     "potato",
 		AllowSignups: true,
 		AvatarURL:    "/example.png",
 		StatusCode:   http.StatusTemporaryRedirect,
@@ -385,27 +626,30 @@ func TestUserOIDC(t *testing.T) {
 		tc := tc
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
-			config := createOIDCConfig(t, tc.Claims)
+			conf := coderdtest.NewOIDCConfig(t, "")
+
+			config := conf.OIDCConfig(t, tc.UserInfoClaims)
 			config.AllowSignups = tc.AllowSignups
 			config.EmailDomain = tc.EmailDomain
+			config.IgnoreEmailVerified = tc.IgnoreEmailVerified
+
 			client := coderdtest.New(t, &coderdtest.Options{
 				OIDCConfig: config,
 			})
-			resp := oidcCallback(t, client)
+			resp := oidcCallback(t, client, conf.EncodeClaims(t, tc.IDTokenClaims))
 			assert.Equal(t, tc.StatusCode, resp.StatusCode)
 
-			ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-			defer cancel()
+			ctx, _ := testutil.Context(t)
 
 			if tc.Username != "" {
-				client.SessionToken = resp.Cookies()[0].Value
+				client.SetSessionToken(authCookieValue(resp.Cookies()))
 				user, err := client.User(ctx, "me")
 				require.NoError(t, err)
 				require.Equal(t, tc.Username, user.Username)
 			}
 
 			if tc.AvatarURL != "" {
-				client.SessionToken = resp.Cookies()[0].Value
+				client.SetSessionToken(authCookieValue(resp.Cookies()))
 				user, err := client.User(ctx, "me")
 				require.NoError(t, err)
 				require.Equal(t, tc.AvatarURL, user.AvatarURL)
@@ -413,11 +657,51 @@ func TestUserOIDC(t *testing.T) {
 		})
 	}
 
+	t.Run("AlternateUsername", func(t *testing.T) {
+		t.Parallel()
+
+		conf := coderdtest.NewOIDCConfig(t, "")
+
+		config := conf.OIDCConfig(t, nil)
+		config.AllowSignups = true
+
+		client := coderdtest.New(t, &coderdtest.Options{
+			OIDCConfig: config,
+		})
+
+		code := conf.EncodeClaims(t, jwt.MapClaims{
+			"email": "jon@coder.com",
+		})
+		resp := oidcCallback(t, client, code)
+		assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+
+		ctx, _ := testutil.Context(t)
+
+		client.SetSessionToken(authCookieValue(resp.Cookies()))
+		user, err := client.User(ctx, "me")
+		require.NoError(t, err)
+		require.Equal(t, "jon", user.Username)
+
+		// Pass a different subject field so that we prompt creating a
+		// new user.
+		code = conf.EncodeClaims(t, jwt.MapClaims{
+			"email": "jon@example2.com",
+			"sub":   "diff",
+		})
+		resp = oidcCallback(t, client, code)
+		assert.Equal(t, http.StatusTemporaryRedirect, resp.StatusCode)
+
+		client.SetSessionToken(authCookieValue(resp.Cookies()))
+		user, err = client.User(ctx, "me")
+		require.NoError(t, err)
+		require.True(t, strings.HasPrefix(user.Username, "jon-"), "username %q should have prefix %q", user.Username, "jon-")
+	})
+
 	t.Run("Disabled", func(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, nil)
-		resp := oidcCallback(t, client)
-		require.Equal(t, http.StatusPreconditionRequired, resp.StatusCode)
+		resp := oidcCallback(t, client, "asdf")
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
 
 	t.Run("NoIDToken", func(t *testing.T) {
@@ -427,7 +711,7 @@ func TestUserOIDC(t *testing.T) {
 				OAuth2Config: &oauth2Config{},
 			},
 		})
-		resp := oidcCallback(t, client)
+		resp := oidcCallback(t, client, "asdf")
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
 
@@ -436,6 +720,7 @@ func TestUserOIDC(t *testing.T) {
 		verifier := oidc.NewVerifier("", &oidc.StaticKeySet{
 			PublicKeys: []crypto.PublicKey{},
 		}, &oidc.Config{})
+		provider := &oidc.Provider{}
 
 		client := coderdtest.New(t, &coderdtest.Options{
 			OIDCConfig: &coderd.OIDCConfig{
@@ -446,51 +731,20 @@ func TestUserOIDC(t *testing.T) {
 						"id_token": "invalid",
 					}),
 				},
+				Provider: provider,
 				Verifier: verifier,
 			},
 		})
-		resp := oidcCallback(t, client)
+		resp := oidcCallback(t, client, "asdf")
 		require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	})
-}
-
-// createOIDCConfig generates a new OIDCConfig that returns a static token
-// with the claims provided.
-func createOIDCConfig(t *testing.T, claims jwt.MapClaims) *coderd.OIDCConfig {
-	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-
-	// https://datatracker.ietf.org/doc/html/rfc7519#section-4.1
-	claims["exp"] = time.Now().Add(time.Hour).UnixMilli()
-	claims["iss"] = "https://coder.com"
-	claims["sub"] = "hello"
-
-	signed, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(key)
-	require.NoError(t, err)
-
-	verifier := oidc.NewVerifier("https://coder.com", &oidc.StaticKeySet{
-		PublicKeys: []crypto.PublicKey{key.Public()},
-	}, &oidc.Config{
-		SkipClientIDCheck: true,
-	})
-
-	return &coderd.OIDCConfig{
-		OAuth2Config: &oauth2Config{
-			token: (&oauth2.Token{
-				AccessToken: "token",
-			}).WithExtra(map[string]interface{}{
-				"id_token": signed,
-			}),
-		},
-		Verifier: verifier,
-	}
 }
 
 func oauth2Callback(t *testing.T, client *codersdk.Client) *http.Response {
 	client.HTTPClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
+
 	state := "somestate"
 	oauthURL, err := client.URL.Parse("/api/v2/users/oauth2/github/callback?code=asd&state=" + state)
 	require.NoError(t, err)
@@ -508,19 +762,18 @@ func oauth2Callback(t *testing.T, client *codersdk.Client) *http.Response {
 	return res
 }
 
-func oidcCallback(t *testing.T, client *codersdk.Client) *http.Response {
+func oidcCallback(t *testing.T, client *codersdk.Client, code string) *http.Response {
 	t.Helper()
 	client.HTTPClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	state := "somestate"
-	oauthURL, err := client.URL.Parse("/api/v2/users/oidc/callback?code=asd&state=" + state)
+	oauthURL, err := client.URL.Parse(fmt.Sprintf("/api/v2/users/oidc/callback?code=%s&state=somestate", code))
 	require.NoError(t, err)
 	req, err := http.NewRequestWithContext(context.Background(), "GET", oauthURL.String(), nil)
 	require.NoError(t, err)
 	req.AddCookie(&http.Cookie{
 		Name:  codersdk.OAuth2StateKey,
-		Value: state,
+		Value: "somestate",
 	})
 	res, err := client.HTTPClient.Do(req)
 	require.NoError(t, err)
@@ -533,4 +786,13 @@ func oidcCallback(t *testing.T, client *codersdk.Client) *http.Response {
 
 func i64ptr(i int64) *int64 {
 	return &i
+}
+
+func authCookieValue(cookies []*http.Cookie) string {
+	for _, cookie := range cookies {
+		if cookie.Name == codersdk.SessionTokenKey {
+			return cookie.Value
+		}
+	}
+	return ""
 }

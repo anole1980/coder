@@ -26,9 +26,9 @@ func TestCreate(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			Parse:           echo.ParseComplete,
-			Provision:       provisionCompleteWithAgent,
-			ProvisionDryRun: provisionCompleteWithAgent,
+			Parse:          echo.ParseComplete,
+			ProvisionApply: provisionCompleteWithAgent,
+			ProvisionPlan:  provisionCompleteWithAgent,
 		})
 		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
@@ -144,9 +144,9 @@ func TestCreate(t *testing.T) {
 
 		defaultValue := "something"
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			Parse:           createTestParseResponseWithDefault(defaultValue),
-			Provision:       echo.ProvisionComplete,
-			ProvisionDryRun: echo.ProvisionComplete,
+			Parse:          createTestParseResponseWithDefault(defaultValue),
+			ProvisionApply: echo.ProvisionComplete,
+			ProvisionPlan:  echo.ProvisionComplete,
 		})
 
 		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
@@ -185,9 +185,9 @@ func TestCreate(t *testing.T) {
 
 		defaultValue := "something"
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			Parse:           createTestParseResponseWithDefault(defaultValue),
-			Provision:       echo.ProvisionComplete,
-			ProvisionDryRun: echo.ProvisionComplete,
+			Parse:          createTestParseResponseWithDefault(defaultValue),
+			ProvisionApply: echo.ProvisionComplete,
+			ProvisionPlan:  echo.ProvisionComplete,
 		})
 
 		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
@@ -228,17 +228,20 @@ func TestCreate(t *testing.T) {
 
 		defaultValue := "something"
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			Parse:           createTestParseResponseWithDefault(defaultValue),
-			Provision:       echo.ProvisionComplete,
-			ProvisionDryRun: echo.ProvisionComplete,
+			Parse:          createTestParseResponseWithDefault(defaultValue),
+			ProvisionApply: echo.ProvisionComplete,
+			ProvisionPlan:  echo.ProvisionComplete,
 		})
+
 		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
-		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+		_ = coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+
 		tempDir := t.TempDir()
 		removeTmpDirUntilSuccessAfterTest(t, tempDir)
 		parameterFile, _ := os.CreateTemp(tempDir, "testParameterFile*.yaml")
-		_, _ = parameterFile.WriteString("zone: \"bananas\"")
-		cmd, root := clitest.New(t, "create", "my-workspace", "--template", template.Name, "--parameter-file", parameterFile.Name())
+		_, _ = parameterFile.WriteString("username: \"boingo\"")
+
+		cmd, root := clitest.New(t, "create", "", "--parameter-file", parameterFile.Name())
 		clitest.SetupConfig(t, client, root)
 		doneChan := make(chan struct{})
 		pty := ptytest.New(t)
@@ -247,11 +250,32 @@ func TestCreate(t *testing.T) {
 		go func() {
 			defer close(doneChan)
 			err := cmd.Execute()
-			assert.EqualError(t, err, "Parameter value absent in parameter file for \"region\"!")
+			assert.NoError(t, err)
 		}()
+		matches := []struct {
+			match string
+			write string
+		}{
+			{
+				match: "Specify a name",
+				write: "my-workspace",
+			},
+			{
+				match: fmt.Sprintf("Enter a value (default: %q):", defaultValue),
+				write: "bingo",
+			},
+			{
+				match: "Confirm create?",
+				write: "yes",
+			},
+		}
+
+		for _, m := range matches {
+			pty.ExpectMatch(m.match)
+			pty.WriteLine(m.write)
+		}
 		<-doneChan
 	})
-
 	t.Run("FailedDryRun", func(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
@@ -264,7 +288,7 @@ func TestCreate(t *testing.T) {
 					},
 				},
 			}},
-			ProvisionDryRun: []*proto.Provision_Response{
+			ProvisionPlan: []*proto.Provision_Response{
 				{
 					Type: &proto.Provision_Response_Complete{
 						Complete: &proto.Provision_Complete{},
@@ -294,6 +318,124 @@ func TestCreate(t *testing.T) {
 		err = cmd.Execute()
 		require.Error(t, err)
 		require.ErrorContains(t, err, "dry-run workspace")
+	})
+}
+
+func TestCreateWithRichParameters(t *testing.T) {
+	t.Parallel()
+
+	const (
+		firstParameterName        = "first_parameter"
+		firstParameterDescription = "This is first parameter"
+		firstParameterValue       = "1"
+
+		secondParameterName        = "second_parameter"
+		secondParameterDescription = "This is second parameter"
+		secondParameterValue       = "2"
+
+		immutableParameterName        = "third_parameter"
+		immutableParameterDescription = "This is not mutable parameter"
+		immutableParameterValue       = "3"
+	)
+
+	echoResponses := &echo.Responses{
+		Parse: echo.ParseComplete,
+		ProvisionPlan: []*proto.Provision_Response{
+			{
+				Type: &proto.Provision_Response_Complete{
+					Complete: &proto.Provision_Complete{
+						Parameters: []*proto.RichParameter{
+							{Name: firstParameterName, Description: firstParameterDescription, Mutable: true},
+							{Name: secondParameterName, Description: secondParameterDescription, Mutable: true},
+							{Name: immutableParameterName, Description: immutableParameterDescription, Mutable: false},
+						},
+					},
+				},
+			}},
+		ProvisionApply: []*proto.Provision_Response{{
+			Type: &proto.Provision_Response_Complete{
+				Complete: &proto.Provision_Complete{},
+			},
+		}},
+	}
+
+	t.Run("InputParameters", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, echoResponses)
+		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+
+		cmd, root := clitest.New(t, "create", "my-workspace", "--template", template.Name)
+		clitest.SetupConfig(t, client, root)
+		doneChan := make(chan struct{})
+		pty := ptytest.New(t)
+		cmd.SetIn(pty.Input())
+		cmd.SetOut(pty.Output())
+		go func() {
+			defer close(doneChan)
+			err := cmd.Execute()
+			assert.NoError(t, err)
+		}()
+
+		matches := []string{
+			firstParameterDescription, firstParameterValue,
+			secondParameterDescription, secondParameterValue,
+			immutableParameterDescription, immutableParameterValue,
+			"Confirm create?", "yes",
+		}
+		for i := 0; i < len(matches); i += 2 {
+			match := matches[i]
+			value := matches[i+1]
+			pty.ExpectMatch(match)
+			pty.WriteLine(value)
+		}
+		<-doneChan
+	})
+
+	t.Run("RichParametersFile", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, echoResponses)
+		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+
+		tempDir := t.TempDir()
+		removeTmpDirUntilSuccessAfterTest(t, tempDir)
+		parameterFile, _ := os.CreateTemp(tempDir, "testParameterFile*.yaml")
+		_, _ = parameterFile.WriteString(
+			firstParameterName + ": " + firstParameterValue + "\n" +
+				secondParameterName + ": " + secondParameterValue + "\n" +
+				immutableParameterName + ": " + immutableParameterValue)
+		cmd, root := clitest.New(t, "create", "my-workspace", "--template", template.Name, "--rich-parameter-file", parameterFile.Name())
+		clitest.SetupConfig(t, client, root)
+
+		doneChan := make(chan struct{})
+		pty := ptytest.New(t)
+		cmd.SetIn(pty.Input())
+		cmd.SetOut(pty.Output())
+		go func() {
+			defer close(doneChan)
+			err := cmd.Execute()
+			assert.NoError(t, err)
+		}()
+
+		matches := []string{
+			"Confirm create?", "yes",
+		}
+		for i := 0; i < len(matches); i += 2 {
+			match := matches[i]
+			value := matches[i+1]
+			pty.ExpectMatch(match)
+			pty.WriteLine(value)
+		}
+		<-doneChan
 	})
 }
 

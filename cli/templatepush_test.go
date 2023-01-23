@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"testing"
@@ -40,8 +41,8 @@ func TestTemplatePush(t *testing.T) {
 
 		// Create new template version with a new parameter
 		source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
-			Parse:     createTestParseResponse(),
-			Provision: echo.ProvisionComplete,
+			Parse:          createTestParseResponse(),
+			ProvisionApply: echo.ProvisionComplete,
 		})
 		cmd, root := clitest.New(t, "templates", "push", template.Name, "-y", "--directory", source, "--test.provisioner", string(database.ProvisionerTypeEcho))
 		clitest.SetupConfig(t, client, root)
@@ -91,8 +92,8 @@ func TestTemplatePush(t *testing.T) {
 
 		// Remove the param
 		source = clitest.CreateTemplateVersionSource(t, &echo.Responses{
-			Parse:     echo.ParseComplete,
-			Provision: echo.ProvisionComplete,
+			Parse:          echo.ParseComplete,
+			ProvisionApply: echo.ProvisionComplete,
 		})
 
 		cmd, root = clitest.New(t, "templates", "push", template.Name, "-y", "--directory", source, "--test.provisioner", string(database.ProvisionerTypeEcho))
@@ -119,10 +120,64 @@ func TestTemplatePush(t *testing.T) {
 
 		// Test the cli command.
 		source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
-			Parse:     echo.ParseComplete,
-			Provision: echo.ProvisionComplete,
+			Parse:          echo.ParseComplete,
+			ProvisionApply: echo.ProvisionComplete,
 		})
-		cmd, root := clitest.New(t, "templates", "push", template.Name, "--directory", source, "--test.provisioner", string(database.ProvisionerTypeEcho))
+		cmd, root := clitest.New(t, "templates", "push", template.Name, "--directory", source, "--test.provisioner", string(database.ProvisionerTypeEcho), "--name", "example")
+		clitest.SetupConfig(t, client, root)
+		pty := ptytest.New(t)
+		cmd.SetIn(pty.Input())
+		cmd.SetOut(pty.Output())
+
+		execDone := make(chan error)
+		go func() {
+			execDone <- cmd.Execute()
+		}()
+
+		matches := []struct {
+			match string
+			write string
+		}{
+			{match: "Upload", write: "yes"},
+		}
+		for _, m := range matches {
+			pty.ExpectMatch(m.match)
+			pty.WriteLine(m.write)
+		}
+
+		require.NoError(t, <-execDone)
+
+		// Assert that the template version changed.
+		templateVersions, err := client.TemplateVersionsByTemplate(context.Background(), codersdk.TemplateVersionsByTemplateRequest{
+			TemplateID: template.ID,
+		})
+		require.NoError(t, err)
+		assert.Len(t, templateVersions, 2)
+		assert.NotEqual(t, template.ActiveVersionID, templateVersions[1].ID)
+		require.Equal(t, "example", templateVersions[1].Name)
+	})
+
+	t.Run("UseWorkingDir", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
+		_ = coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
+
+		// Test the cli command.
+		source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
+			Parse:          echo.ParseComplete,
+			ProvisionApply: echo.ProvisionComplete,
+		})
+
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID,
+			func(r *codersdk.CreateTemplateRequest) {
+				r.Name = filepath.Base(source)
+			})
+
+		// Don't pass the name of the template, it should use the
+		// directory of the source.
+		cmd, root := clitest.New(t, "templates", "push", "--directory", source, "--test.provisioner", string(database.ProvisionerTypeEcho))
 		clitest.SetupConfig(t, client, root)
 		pty := ptytest.New(t)
 		cmd.SetIn(pty.Input())
@@ -155,47 +210,35 @@ func TestTemplatePush(t *testing.T) {
 		assert.NotEqual(t, template.ActiveVersionID, templateVersions[1].ID)
 	})
 
-	t.Run("UseWorkingDir", func(t *testing.T) {
+	t.Run("Stdin", func(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
 		_ = coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
 
-		// Test the cli command.
-		source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
-			Parse:     echo.ParseComplete,
-			Provision: echo.ProvisionComplete,
+		source, err := echo.Tar(&echo.Responses{
+			Parse:          echo.ParseComplete,
+			ProvisionApply: echo.ProvisionComplete,
 		})
+		require.NoError(t, err)
 
-		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID,
-			func(r *codersdk.CreateTemplateRequest) {
-				r.Name = filepath.Base(source)
-			})
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 
-		// Don't pass the name of the template, it should use the
-		// directory of the source.
-		cmd, root := clitest.New(t, "templates", "push", "--directory", source, "--test.provisioner", string(database.ProvisionerTypeEcho))
+		cmd, root := clitest.New(
+			t, "templates", "push", "--directory", "-",
+			"--test.provisioner", string(database.ProvisionerTypeEcho),
+			template.Name,
+		)
 		clitest.SetupConfig(t, client, root)
 		pty := ptytest.New(t)
-		cmd.SetIn(pty.Input())
+		cmd.SetIn(bytes.NewReader(source))
 		cmd.SetOut(pty.Output())
 
 		execDone := make(chan error)
 		go func() {
 			execDone <- cmd.Execute()
 		}()
-
-		matches := []struct {
-			match string
-			write string
-		}{
-			{match: "Upload", write: "yes"},
-		}
-		for _, m := range matches {
-			pty.ExpectMatch(m.match)
-			pty.WriteLine(m.write)
-		}
 
 		require.NoError(t, <-execDone)
 

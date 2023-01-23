@@ -1,6 +1,6 @@
 import { makeStyles } from "@material-ui/core/styles"
 import dayjs from "dayjs"
-import { FC } from "react"
+import { FC, Fragment } from "react"
 import { ProvisionerJobLog } from "../../api/typesGenerated"
 import { MONOSPACE_FONT_FAMILY } from "../../theme/constants"
 import { Logs } from "../Logs/Logs"
@@ -10,18 +10,18 @@ const Language = {
 }
 
 type Stage = ProvisionerJobLog["stage"]
+type LogsGroupedByStage = Record<Stage, ProvisionerJobLog[]>
+type GroupLogsByStageFn = (logs: ProvisionerJobLog[]) => LogsGroupedByStage
 
-const groupLogsByStage = (logs: ProvisionerJobLog[]) => {
-  const logsByStage: Record<Stage, ProvisionerJobLog[]> = {}
+export const groupLogsByStage: GroupLogsByStageFn = (logs) => {
+  const logsByStage: LogsGroupedByStage = {}
 
   for (const log of logs) {
-    // If there is no log in the stage record, add an empty array
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-    if (logsByStage[log.stage] === undefined) {
-      logsByStage[log.stage] = []
+    if (log.stage in logsByStage) {
+      logsByStage[log.stage].push(log)
+    } else {
+      logsByStage[log.stage] = [log]
     }
-
-    logsByStage[log.stage].push(log)
   }
 
   return logsByStage
@@ -54,12 +54,13 @@ export const WorkspaceBuildLogs: FC<WorkspaceBuildLogsProps> = ({ logs }) => {
         const lines = logs.map((log) => ({
           time: log.created_at,
           output: log.output,
+          level: log.log_level,
         }))
         const duration = getStageDurationInSeconds(logs)
         const shouldDisplayDuration = duration !== undefined
 
         return (
-          <div key={stage}>
+          <Fragment key={stage}>
             <div className={styles.header}>
               <div>{stage}</div>
               {shouldDisplayDuration && (
@@ -68,8 +69,8 @@ export const WorkspaceBuildLogs: FC<WorkspaceBuildLogsProps> = ({ logs }) => {
                 </div>
               )}
             </div>
-            {!isEmpty && <Logs lines={lines} className={styles.codeBlock} />}
-          </div>
+            {!isEmpty && <Logs lines={lines} />}
+          </Fragment>
         )
       })}
     </div>
@@ -84,24 +85,32 @@ const useStyles = makeStyles((theme) => ({
   },
 
   header: {
-    fontSize: theme.typography.body1.fontSize,
+    fontSize: 14,
     padding: theme.spacing(2),
-    paddingLeft: theme.spacing(4),
-    paddingRight: theme.spacing(4),
+    paddingLeft: theme.spacing(3),
+    paddingRight: theme.spacing(3),
     borderBottom: `1px solid ${theme.palette.divider}`,
     backgroundColor: theme.palette.background.paper,
     display: "flex",
     alignItems: "center",
+    fontFamily: "Inter",
+
+    "&:first-child": {
+      borderTopLeftRadius: theme.shape.borderRadius,
+      borderTopRightRadius: theme.shape.borderRadius,
+    },
+
+    "&:last-child": {
+      borderBottom: 0,
+      borderTop: `1px solid ${theme.palette.divider}`,
+      borderBottomLeftRadius: theme.shape.borderRadius,
+      borderBottomRightRadius: theme.shape.borderRadius,
+    },
   },
 
   duration: {
     marginLeft: "auto",
     color: theme.palette.text.secondary,
     fontSize: theme.typography.body2.fontSize,
-  },
-
-  codeBlock: {
-    padding: theme.spacing(2),
-    paddingLeft: theme.spacing(4),
   },
 }))

@@ -1,5 +1,12 @@
 import ThemeProvider from "@material-ui/styles/ThemeProvider"
-import { render as wrappedRender, RenderResult } from "@testing-library/react"
+import {
+  render as wrappedRender,
+  RenderResult,
+  screen,
+  waitForElementToBeRemoved,
+} from "@testing-library/react"
+import { AuthProvider } from "components/AuthProvider/AuthProvider"
+import { DashboardLayout } from "components/Dashboard/DashboardLayout"
 import { createMemoryHistory } from "history"
 import { i18n } from "i18n"
 import { FC, ReactElement } from "react"
@@ -13,19 +20,20 @@ import {
 } from "react-router-dom"
 import { RequireAuth } from "../components/RequireAuth/RequireAuth"
 import { dark } from "../theme"
-import { XServiceProvider } from "../xServices/StateContext"
 import { MockUser } from "./entities"
 
 export const history = createMemoryHistory()
 
-export const WrapperComponent: FC<React.PropsWithChildren<unknown>> = ({ children }) => {
+export const WrapperComponent: FC<React.PropsWithChildren<unknown>> = ({
+  children,
+}) => {
   return (
     <HelmetProvider>
-      <HistoryRouter history={history}>
-        <XServiceProvider>
-          <ThemeProvider theme={dark}>{children}</ThemeProvider>
-        </XServiceProvider>
-      </HistoryRouter>
+      <ThemeProvider theme={dark}>
+        <HistoryRouter history={history}>
+          <AuthProvider>{children}</AuthProvider>
+        </HistoryRouter>
+      </ThemeProvider>
     </HelmetProvider>
   )
 }
@@ -44,21 +52,30 @@ type RenderWithAuthResult = RenderResult & { user: typeof MockUser }
  */
 export function renderWithAuth(
   ui: JSX.Element,
-  { route = "/", path }: { route?: string; path?: string } = {},
+  {
+    route = "/",
+    path,
+    routes,
+  }: { route?: string; path?: string; routes?: JSX.Element } = {},
 ): RenderWithAuthResult {
   const renderResult = wrappedRender(
     <HelmetProvider>
-      <MemoryRouter initialEntries={[route]}>
-        <XServiceProvider>
-          <I18nextProvider i18n={i18n}>
-            <ThemeProvider theme={dark}>
+      <I18nextProvider i18n={i18n}>
+        <ThemeProvider theme={dark}>
+          <AuthProvider>
+            <MemoryRouter initialEntries={[route]}>
               <Routes>
-                <Route path={path ?? route} element={<RequireAuth>{ui}</RequireAuth>} />
+                <Route element={<RequireAuth />}>
+                  <Route element={<DashboardLayout />}>
+                    <Route path={path ?? route} element={ui} />
+                  </Route>
+                </Route>
+                {routes}
               </Routes>
-            </ThemeProvider>
-          </I18nextProvider>
-        </XServiceProvider>
-      </MemoryRouter>
+            </MemoryRouter>
+          </AuthProvider>
+        </ThemeProvider>
+      </I18nextProvider>
     </HelmetProvider>,
   )
 
@@ -67,5 +84,8 @@ export function renderWithAuth(
     ...renderResult,
   }
 }
+
+export const waitForLoaderToBeRemoved = (): Promise<void> =>
+  waitForElementToBeRemoved(() => screen.getByRole("progressbar"))
 
 export * from "./entities"

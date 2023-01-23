@@ -14,7 +14,7 @@ type Pagination struct {
 	// Offset for better performance. To use it as an alternative,
 	// set AfterID to the last UUID returned by the previous
 	// request.
-	AfterID uuid.UUID `json:"after_id,omitempty"`
+	AfterID uuid.UUID `json:"after_id,omitempty" format:"uuid"`
 	// Limit sets the maximum number of users to be returned
 	// in a single page. If the limit is <= 0, there is no limit
 	// and all users are returned.
@@ -28,7 +28,7 @@ type Pagination struct {
 
 // asRequestOption returns a function that can be used in (*Client).Request.
 // It modifies the request query parameters.
-func (p Pagination) asRequestOption() requestOption {
+func (p Pagination) asRequestOption() RequestOption {
 	return func(r *http.Request) {
 		q := r.URL.Query()
 		if p.AfterID != uuid.Nil {

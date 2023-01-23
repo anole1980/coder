@@ -1,4 +1,5 @@
 import { makeStyles } from "@material-ui/core/styles"
+import { PropsWithChildren, FC } from "react"
 import { combineClasses } from "../../util/combineClasses"
 import { Stack } from "../Stack/Stack"
 
@@ -7,35 +8,49 @@ export interface PageHeaderProps {
   className?: string
 }
 
-export const PageHeader: React.FC<React.PropsWithChildren<PageHeaderProps>> = ({
+export const PageHeader: FC<PropsWithChildren<PageHeaderProps>> = ({
   children,
   actions,
   className,
 }) => {
-  const styles = useStyles()
+  const styles = useStyles({})
 
   return (
-    <div className={combineClasses([styles.root, className])}>
+    <header
+      className={combineClasses([styles.root, className])}
+      data-testid="header"
+    >
       <hgroup>{children}</hgroup>
       {actions && (
         <Stack direction="row" className={styles.actions}>
           {actions}
         </Stack>
       )}
-    </div>
+    </header>
   )
 }
 
-export const PageHeaderTitle: React.FC<React.PropsWithChildren<unknown>> = ({ children }) => {
-  const styles = useStyles()
+export const PageHeaderTitle: FC<PropsWithChildren<unknown>> = ({
+  children,
+}) => {
+  const styles = useStyles({})
 
   return <h1 className={styles.title}>{children}</h1>
 }
 
-export const PageHeaderSubtitle: React.FC<React.PropsWithChildren<unknown>> = ({ children }) => {
-  const styles = useStyles()
+export const PageHeaderSubtitle: FC<
+  PropsWithChildren<{ condensed?: boolean }>
+> = ({ children, condensed }) => {
+  const styles = useStyles({
+    condensed,
+  })
 
   return <h2 className={styles.subtitle}>{children}</h2>
+}
+
+export const PageHeaderCaption: FC<PropsWithChildren> = ({ children }) => {
+  const styles = useStyles({})
+  return <span className={styles.caption}>{children}</span>
 }
 
 const useStyles = makeStyles((theme) => ({
@@ -43,7 +58,7 @@ const useStyles = makeStyles((theme) => ({
     display: "flex",
     alignItems: "center",
     paddingTop: theme.spacing(6),
-    paddingBottom: theme.spacing(5),
+    paddingBottom: theme.spacing(6),
 
     [theme.breakpoints.down("sm")]: {
       flexDirection: "column",
@@ -52,7 +67,7 @@ const useStyles = makeStyles((theme) => ({
   },
 
   title: {
-    fontSize: theme.spacing(4),
+    fontSize: theme.spacing(3),
     fontWeight: 400,
     margin: 0,
     display: "flex",
@@ -61,12 +76,13 @@ const useStyles = makeStyles((theme) => ({
   },
 
   subtitle: {
-    fontSize: theme.spacing(2.25),
+    fontSize: theme.spacing(2),
     color: theme.palette.text.secondary,
     fontWeight: 400,
     display: "block",
     margin: 0,
-    marginTop: theme.spacing(1),
+    marginTop: ({ condensed }: { condensed?: boolean }) =>
+      condensed ? theme.spacing(0.5) : theme.spacing(1),
   },
 
   actions: {
@@ -77,5 +93,13 @@ const useStyles = makeStyles((theme) => ({
       marginLeft: "initial",
       width: "100%",
     },
+  },
+
+  caption: {
+    fontSize: 12,
+    color: theme.palette.text.secondary,
+    fontWeight: 600,
+    textTransform: "uppercase",
+    letterSpacing: "0.1em",
   },
 }))

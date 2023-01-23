@@ -1,7 +1,7 @@
 import Button, { ButtonProps } from "@material-ui/core/Button"
 import CircularProgress from "@material-ui/core/CircularProgress"
 import { makeStyles } from "@material-ui/core/styles"
-import { Theme } from "@material-ui/core/styles/createMuiTheme"
+import { Theme } from "@material-ui/core/styles/createTheme"
 import { FC } from "react"
 
 export interface LoadingButtonProps extends ButtonProps {
@@ -31,7 +31,7 @@ export const LoadingButton: FC<React.PropsWithChildren<LoadingButtonProps>> = ({
       <span style={hidden}>{children}</span>
       {loading && (
         <div className={styles.loader}>
-          <CircularProgress size={18} className={styles.spinner} />
+          <CircularProgress size={16} className={styles.spinner} />
         </div>
       )}
       {Boolean(loadingLabel) && loadingLabel}
@@ -63,7 +63,7 @@ const useStyles = makeStyles<Theme, StyleProps>((theme) => ({
     top: "50%",
     left: "50%",
     height: 22, // centering loading icon
-    width: 18,
+    width: 16,
   },
   spinner: {
     color: theme.palette.text.disabled,

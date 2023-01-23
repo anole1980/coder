@@ -51,7 +51,11 @@ func TestScheduleShow(t *testing.T) {
 		lines := strings.Split(strings.TrimSpace(stdoutBuf.String()), "\n")
 		if assert.Len(t, lines, 4) {
 			assert.Contains(t, lines[0], "Starts at    7:30AM Mon-Fri (Europe/Dublin)")
-			assert.Contains(t, lines[1], "Starts next  7:30AM IST on ")
+			assert.Contains(t, lines[1], "Starts next  7:30AM")
+			// it should have either IST or GMT
+			if !strings.Contains(lines[1], "IST") && !strings.Contains(lines[1], "GMT") {
+				t.Error("expected either IST or GMT")
+			}
 			assert.Contains(t, lines[2], "Stops at     8h after start")
 			assert.NotContains(t, lines[3], "Stops next   -")
 		}
@@ -61,7 +65,6 @@ func TestScheduleShow(t *testing.T) {
 		t.Parallel()
 
 		var (
-			ctx       = context.Background()
 			client    = coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 			user      = coderdtest.CreateFirstUser(t, client)
 			version   = coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
@@ -69,13 +72,12 @@ func TestScheduleShow(t *testing.T) {
 			project   = coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 			workspace = coderdtest.CreateWorkspace(t, client, user.OrganizationID, project.ID, func(cwr *codersdk.CreateWorkspaceRequest) {
 				cwr.AutostartSchedule = nil
+				cwr.TTLMillis = nil
 			})
+			_         = coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
 			cmdArgs   = []string{"schedule", "show", workspace.Name}
 			stdoutBuf = &bytes.Buffer{}
 		)
-
-		// unset workspace TTL
-		require.NoError(t, client.UpdateWorkspaceTTL(ctx, workspace.ID, codersdk.UpdateWorkspaceTTLRequest{TTLMillis: nil}))
 
 		cmd, root := clitest.New(t, cmdArgs...)
 		clitest.SetupConfig(t, client, root)
@@ -139,7 +141,11 @@ func TestScheduleStart(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(stdoutBuf.String()), "\n")
 	if assert.Len(t, lines, 4) {
 		assert.Contains(t, lines[0], "Starts at    9:30AM Mon-Fri (Europe/Dublin)")
-		assert.Contains(t, lines[1], "Starts next  9:30AM IST on")
+		assert.Contains(t, lines[1], "Starts next  9:30AM")
+		// it should have either IST or GMT
+		if !strings.Contains(lines[1], "IST") && !strings.Contains(lines[1], "GMT") {
+			t.Error("expected either IST or GMT")
+		}
 	}
 
 	// Ensure autostart schedule updated

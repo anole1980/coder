@@ -39,15 +39,30 @@ direnv: export +AR +AS +CC +CONFIG_SHELL +CXX +HOST_PATH +IN_NIX_SHELL +LD +NIX_
 ```
 
 Alternatively if you do not want to use nix then you'll need to install the need the following tools by hand:
+
 - Go 1.18+
+  - on macOS, run `brew install go`
 - Node 14+
-- GNU Make
+  - on macOS, run `brew install node`
+- GNU Make 4.0+
+  - on macOS, run `brew install make`
 - [`shfmt`](https://github.com/mvdan/sh#shfmt)
+  - on macOS, run `brew install shfmt`
 - [`nfpm`](https://nfpm.goreleaser.com/install)
-- [`pg_dump`]
+  - on macOS, run `brew install goreleaser/tap/nfpm && brew install nfpm`
+- [`pg_dump`](https://stackoverflow.com/a/49689589)
   - on macOS, run `brew install libpq zstd`
   - on Linux, install [`zstd`](https://github.com/horta/zstd.install)
-
+- [`pkg-config`]()
+  - on macOS, run `brew install pkg-config`
+- [`pixman`]()
+  - on macOS, run `brew install pixman`
+- [`cairo`]()
+  - on macOS, run `brew install cairo`
+- [`pango`]()
+  - on macOS, run `brew install pango`
+- [`pandoc`]()
+  - on macOS, run `brew install pandocomatic`
 
 ### Development workflow
 
@@ -58,7 +73,81 @@ Use the following `make` commands and scripts in development:
 - `make install` installs binaries to `$GOPATH/bin`
 - `make test`
 
+### Adding database migrations and fixtures
+
+#### Database migrations
+
+Database migrations are managed with [`migrate`](https://github.com/golang-migrate/migrate).
+
+To add new migrations, use the following command:
+
+```
+$ ./coderd/database/migrations/create_fixture.sh my name
+/home/coder/src/coder/coderd/database/migrations/000070_my_name.up.sql
+/home/coder/src/coder/coderd/database/migrations/000070_my_name.down.sql
+Run "make gen" to generate models.
+```
+
+Then write queries into the generated `.up.sql` and `.down.sql` files and commit
+them into the repository. The down script should make a best-effort to retain as
+much data as possible.
+
+#### Database fixtures (for testing migrations)
+
+There are two types of fixtures that are used to test that migrations don't
+break existing Coder deployments:
+
+- Partial fixtures [`migrations/testdata/fixtures`](../coderd/database/migrations/testdata/fixtures)
+- Full database dumps [`migrations/testdata/full_dumps`](../coderd/database/migrations/testdata/full_dumps)
+
+Both types behave like database migrations (they also [`migrate`](https://github.com/golang-migrate/migrate)). Their behavior mirrors Coder migrations such that when migration
+number `000022` is applied, fixture `000022` is applied afterwards.
+
+Partial fixtures are used to conveniently add data to newly created tables so
+that we can ensure that this data is migrated without issue.
+
+Full database dumps are for testing the migration of fully-fledged Coder
+deployments. These are usually done for a specific version of Coder and are
+often fixed in time. A full database dump may be necessary when testing the
+migration of multiple features or complex configurations.
+
+To add a new partial fixture, run the following command:
+
+```
+$ ./coderd/database/migrations/create_fixture.sh my fixture
+/home/coder/src/coder/coderd/database/migrations/testdata/fixtures/000070_my_fixture.up.sql
+```
+
+Then add some queries to insert data and commit the file to the repo. See
+[`000024_example.up.sql`](../coderd/database/migrations/testdata/fixtures/000024_example.up.sql)
+for an example.
+
+To create a full dump, run a fully fledged Coder deployment and use it to
+generate data in the database. Then shut down the deployment and take a snapshot
+of the database.
+
+```
+$ mkdir -p coderd/database/migrations/testdata/full_dumps/v0.12.2 && cd $_
+$ pg_dump "postgres://coder@localhost:..." -a --inserts >000069_dump_v0.12.2.up.sql
+```
+
+Make sure sensitive data in the dump is desensitized, for instance names,
+emails, OAuth tokens and other secrets. Then commit the dump to the project.
+
+To find out what the latest migration for a version of Coder is, use the
+following command:
+
+```
+$ git ls-files v0.12.2 -- coderd/database/migrations/*.up.sql
+```
+
+This helps in naming the dump (e.g. `000069` above).
+
 ## Styling
+
+### Documentation
+
+Our style guide for authoring documentation can be found [here](./contributing/documentation.md).
 
 ### Backend
 
@@ -110,3 +199,50 @@ one or more reviewers making new comments every time, then waiting for an
 updated change before reviewing again. All contributors, including those from
 maintainers, are subject to the same review cycle; this process is not meant to
 be applied selectively or to discourage anyone from contributing.
+
+## Releases
+
+Coder releases are initiated via [`./scripts/release.sh`](../scripts/release.sh) and automated via GitHub Actions. Specifically, the [`release.yaml`](../.github/workflows/release.yaml) workflow. They are created based on the current [`main`](https://github.com/coder/coder/tree/main) branch.
+
+The release notes for a release are automatically generated from commit titles and metadata from PRs that are merged into `main`.
+
+### Creating a release
+
+The creation of a release is initiated via [`./scripts/release.sh`](../scripts/release.sh). This script will show a preview of the release that will be created, and if you choose to continue, create and push the tag which will trigger the creation of the release via GitHub Actions.
+
+See `./scripts/release.sh --help` for more information.
+
+### Creating a release (via workflow dispatch)
+
+Typically the workflow dispatch is only used to test (dry-run) a release, meaning no actual release will take place. The workflow can be dispatched manually from [Actions: Release](https://github.com/coder/coder/actions/workflows/release.yaml). Simply press "Run workflow" and choose dry-run.
+
+If a release has failed after the tag has been created and pushed, it can be retried by again, pressing "Run workflow", changing "Use workflow from" from "Branch: main" to "Tag: vX.X.X" and not selecting dry-run.
+
+### Commit messages
+
+Commit messages should follow the [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/) specification.
+
+Allowed commit types (`feat`, `fix`, etc.) are listed in [conventional-commit-types](https://github.com/commitizen/conventional-commit-types/blob/c3a9be4c73e47f2e8197de775f41d981701407fb/index.json). Note that these types are also used to automatically sort and organize the release notes.
+
+A good commit message title uses the imperative, present tense and is ~50
+characters long (no more than 72).
+
+Examples:
+
+- Good: `feat(api): Add feature X`
+- Bad: `feat(api): Added feature X` (past tense)
+
+A good rule of thumb for writing good commit messages is to recite: [If applied, this commit will ...](https://reflectoring.io/meaningful-commit-messages/).
+
+**Note:** We lint PR titles to ensure they follow the Conventional Commits specification, however, it's still possible to merge PRs on GitHub with a badly formatted title. Take care when merging single-commit PRs as GitHub may prefer to use the original commit title instead of the PR title.
+
+### Breaking changes
+
+Breaking changes can be triggered in two ways:
+
+- Add `!` to the commit message title, e.g. `feat(api)!: Remove deprecated endpoint /test`
+- Add the [`release/breaking`](https://github.com/coder/coder/issues?q=sort%3Aupdated-desc+label%3Arelease%2Fbreaking) label to a PR that has, or will be, merged into `main`.
+
+### Security
+
+The [`security`](https://github.com/coder/coder/issues?q=sort%3Aupdated-desc+label%3Asecurity) label can be added to PRs that have, or will be, merged into `main`. Doing so will make sure the change stands out in the release notes.

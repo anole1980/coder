@@ -20,53 +20,56 @@ to log in and manage templates.
 1. Create a PostgreSQL deployment. Coder does not manage a database server for
    you.
 
-   - If you're in a public cloud such as
-     [Google Cloud](https://cloud.google.com/sql/docs/postgres/),
-     [AWS](https://aws.amazon.com/rds/postgresql/),
-     [Azure](https://docs.microsoft.com/en-us/azure/postgresql/), or
-     [DigitalOcean](https://www.digitalocean.com/products/managed-databases-postgresql),
-     you can use the managed PostgreSQL offerings they provide. Make sure that
-     the PostgreSQL service is running and accessible from your cluster. It
-     should be in the same network, same project, etc.
+   If you're in a public cloud such as
+   [Google Cloud](https://cloud.google.com/sql/docs/postgres/),
+   [AWS](https://aws.amazon.com/rds/postgresql/),
+   [Azure](https://docs.microsoft.com/en-us/azure/postgresql/), or
+   [DigitalOcean](https://www.digitalocean.com/products/managed-databases-postgresql),
+   you can use the managed PostgreSQL offerings they provide. Make sure that
+   the PostgreSQL service is running and accessible from your cluster. It
+   should be in the same network, same project, etc.
 
-   - You can install Postgres manually on your cluster using the
-     [Bitnami PostgreSQL Helm chart](https://github.com/bitnami/charts/tree/master/bitnami/postgresql#readme). There are some
-     [helpful guides](https://phoenixnap.com/kb/postgresql-kubernetes) on the
-     internet that explain sensible configurations for this chart. Example:
+   You can install Postgres manually on your cluster using the
+   [Bitnami PostgreSQL Helm chart](https://github.com/bitnami/charts/tree/master/bitnami/postgresql#readme). There are some
+   [helpful guides](https://phoenixnap.com/kb/postgresql-kubernetes) on the
+   internet that explain sensible configurations for this chart. Example:
 
-     ```sh
-     # Install PostgreSQL
-     helm repo add bitnami https://charts.bitnami.com/bitnami
-     helm install coder-db bitnami/postgresql \
-         --namespace coder \
-         --set auth.username=coder \
-         --set auth.password=coder \
-         --set auth.database=coder \
-         --set persistence.size=10Gi
-     ```
+   ```console
+   # Install PostgreSQL
+   helm repo add bitnami https://charts.bitnami.com/bitnami
+   helm install coder-db bitnami/postgresql \
+       --namespace coder \
+       --set auth.username=coder \
+       --set auth.password=coder \
+       --set auth.database=coder \
+       --set persistence.size=10Gi
+   ```
 
-     The cluster-internal DB URL for the above database is:
+   The cluster-internal DB URL for the above database is:
 
-     ```
-     postgres://coder:coder@postgres-postgresql.coder.svc.cluster.local:5432/coder?sslmode=disable
-     ```
+   ```console
+   postgres://coder:coder@coder-db-postgresql.coder.svc.cluster.local:5432/coder?sslmode=disable
+   ```
 
-     > Ensure you set up periodic backups so you don't lose data.
+   > Ensure you set up periodic backups so you don't lose data.
 
-   - You can use
-     [Postgres operator](https://github.com/zalando/postgres-operator) to
-     manage PostgreSQL deployments on your Kubernetes cluster.
+   You can use
+   [Postgres operator](https://github.com/zalando/postgres-operator) to
+   manage PostgreSQL deployments on your Kubernetes cluster.
 
-1. Download the latest `coder_helm` package from
-   [GitHub releases](https://github.com/coder/coder/releases).
+1. Add the Coder Helm repo:
+
+   ```console
+   helm repo add coder-v2 https://helm.coder.com/v2
+   ```
 
 1. Create a secret with the database URL:
 
-   ```sh
+   ```console
    # Uses Bitnami PostgreSQL example. If you have another database,
    # change to the proper URL.
    kubectl create secret generic coder-db-url -n coder \
-      --from-literal=url="postgres://coder:coder@postgres-postgresql.coder.svc.cluster.local:5432/coder?sslmode=disable"
+      --from-literal=url="postgres://coder:coder@coder-db-postgresql.coder.svc.cluster.local:5432/coder?sslmode=disable"
    ```
 
 1. Create a `values.yaml` with the configuration settings you'd like for your
@@ -84,8 +87,6 @@ to log in and manage templates.
      # `CODER_TLS_ENABLE`, `CODER_TLS_CERT_FILE` or `CODER_TLS_KEY_FILE` as
      # they are already set by the Helm chart and will cause conflicts.
      env:
-       - name: CODER_ACCESS_URL
-         value: "https://coder.example.com"
        - name: CODER_PG_CONNECTION_URL
          valueFrom:
            secretKeyRef:
@@ -95,14 +96,14 @@ to log in and manage templates.
              name: coder-db-url
              key: url
 
-       # This env variable controls whether or not to auto-import the
-       # "kubernetes" template on first startup. This will not work unless
-       # coder.serviceAccount.workspacePerms is true.
-       - name: CODER_TEMPLATE_AUTOIMPORT
-         value: "kubernetes"
+       # (Optional) For production deployments the access URL should be set.
+       # If you're just trying Coder, access the dashboard via the service IP.
+       - name: CODER_ACCESS_URL
+         value: "https://coder.example.com"
 
      #tls:
-     #  secretName: my-tls-secret-name
+     #  secretNames:
+     #    - my-tls-secret-name
    ```
 
    > You can view our
@@ -111,15 +112,15 @@ to log in and manage templates.
    > [values.yaml](https://github.com/coder/coder/blob/main/helm/values.yaml)
    > file directly.
 
-1. Run the following commands to install the chart in your cluster.
+1. Run the following command to install the chart in your cluster.
 
-   ```sh
-   helm install coder ./coder_helm_x.y.z.tgz \
+   ```console
+   helm install coder coder-v2/coder \
        --namespace coder \
        --values values.yaml
    ```
 
-   You can watch Coder start up by running `kubectl get pods`. Once Coder has
+   You can watch Coder start up by running `kubectl get pods -n coder`. Once Coder has
    started, the `coder-*` pods should enter the `Running` state.
 
 1. Log in to Coder
@@ -134,12 +135,13 @@ to log in and manage templates.
 ## Upgrading Coder via Helm
 
 To upgrade Coder in the future or change values,
-you can run the following command with a new `coder_helm_x.y.z.tgz` file from GitHub releases:
+you can run the following command:
 
 ```console
-$ helm upgrade coder ./coder_helm_x.y.z.tgz \
-    --namespace coder \
-    -f values.yaml
+helm repo update
+helm upgrade coder coder-v2/coder \
+  --namespace coder \
+  -f values.yaml
 ```
 
 ## Troubleshooting

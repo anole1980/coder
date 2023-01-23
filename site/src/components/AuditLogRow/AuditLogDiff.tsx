@@ -3,6 +3,7 @@ import { AuditLog } from "api/typesGenerated"
 import { colors } from "theme/colors"
 import { MONOSPACE_FONT_FAMILY } from "theme/constants"
 import { combineClasses } from "util/combineClasses"
+import { FC } from "react"
 
 const getDiffValue = (value: unknown): string => {
   if (typeof value === "string") {
@@ -21,7 +22,7 @@ const getDiffValue = (value: unknown): string => {
   return value.toString()
 }
 
-export const AuditLogDiff: React.FC<{ diff: AuditLog["diff"] }> = ({ diff }) => {
+export const AuditLogDiff: FC<{ diff: AuditLog["diff"] }> = ({ diff }) => {
   const styles = useStyles()
   const diffEntries = Object.entries(diff)
 
@@ -34,8 +35,13 @@ export const AuditLogDiff: React.FC<{ diff: AuditLog["diff"] }> = ({ diff }) => 
             <div className={styles.diffIcon}>-</div>
             <div>
               {attrName}:{" "}
-              <span className={combineClasses([styles.diffValue, styles.diffValueOld])}>
-                {getDiffValue(valueDiff.old)}
+              <span
+                className={combineClasses([
+                  styles.diffValue,
+                  styles.diffValueOld,
+                ])}
+              >
+                {valueDiff.secret ? "••••••••" : getDiffValue(valueDiff.old)}
               </span>
             </div>
           </div>
@@ -48,8 +54,13 @@ export const AuditLogDiff: React.FC<{ diff: AuditLog["diff"] }> = ({ diff }) => 
             <div className={styles.diffIcon}>+</div>
             <div>
               {attrName}:{" "}
-              <span className={combineClasses([styles.diffValue, styles.diffValueNew])}>
-                {getDiffValue(valueDiff.new)}
+              <span
+                className={combineClasses([
+                  styles.diffValue,
+                  styles.diffValueNew,
+                ])}
+              >
+                {valueDiff.secret ? "••••••••" : getDiffValue(valueDiff.new)}
               </span>
             </div>
           </div>
@@ -66,13 +77,18 @@ const useStyles = makeStyles((theme) => ({
     fontSize: theme.typography.body2.fontSize,
     borderTop: `1px solid ${theme.palette.divider}`,
     fontFamily: MONOSPACE_FONT_FAMILY,
+    position: "relative",
+    zIndex: 2,
   },
 
   diffColumn: {
     flex: 1,
     paddingTop: theme.spacing(2),
     paddingBottom: theme.spacing(2.5),
+    paddingRight: theme.spacing(2),
     lineHeight: "160%",
+    alignSelf: "stretch",
+    overflowWrap: "anywhere",
   },
 
   diffOld: {
@@ -87,7 +103,7 @@ const useStyles = makeStyles((theme) => ({
 
   diffLine: {
     opacity: 0.5,
-    width: theme.spacing(8),
+    width: theme.spacing(6),
     textAlign: "right",
     flexShrink: 0,
   },
@@ -96,6 +112,7 @@ const useStyles = makeStyles((theme) => ({
     width: theme.spacing(4),
     textAlign: "center",
     fontSize: theme.typography.body1.fontSize,
+    flexShrink: 0,
   },
 
   diffNew: {

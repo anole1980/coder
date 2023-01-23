@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/coder/coder/coderd"
 	"github.com/coder/coder/coderd/audit"
 	"github.com/coder/coder/coderd/coderdtest"
 	"github.com/coder/coder/coderd/database"
@@ -32,7 +31,11 @@ func TestFirstUser(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
-		_, err := client.CreateFirstUser(ctx, codersdk.CreateFirstUserRequest{})
+		has, err := client.HasFirstUser(context.Background())
+		require.NoError(t, err)
+		require.False(t, has)
+
+		_, err = client.CreateFirstUser(ctx, codersdk.CreateFirstUserRequest{})
 		require.Error(t, err)
 	})
 
@@ -45,10 +48,9 @@ func TestFirstUser(t *testing.T) {
 		defer cancel()
 
 		_, err := client.CreateFirstUser(ctx, codersdk.CreateFirstUserRequest{
-			Email:            "some@email.com",
-			Username:         "exampleuser",
-			Password:         "password",
-			OrganizationName: "someorg",
+			Email:    "some@email.com",
+			Username: "exampleuser",
+			Password: "password",
 		})
 		var apiErr *codersdk.Error
 		require.ErrorAs(t, err, &apiErr)
@@ -61,73 +63,55 @@ func TestFirstUser(t *testing.T) {
 		_ = coderdtest.CreateFirstUser(t, client)
 	})
 
-	t.Run("AutoImportsTemplates", func(t *testing.T) {
+	t.Run("Trial", func(t *testing.T) {
 		t.Parallel()
-
-		// All available auto import templates should be added to this list, and
-		// also added to the switch statement below.
-		autoImportTemplates := []coderd.AutoImportTemplate{
-			coderd.AutoImportTemplateKubernetes,
-		}
+		called := make(chan struct{})
 		client := coderdtest.New(t, &coderdtest.Options{
-			AutoImportTemplates: autoImportTemplates,
+			TrialGenerator: func(ctx context.Context, s string) error {
+				close(called)
+				return nil
+			},
 		})
-		u := coderdtest.CreateFirstUser(t, client)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
-		templates, err := client.TemplatesByOrganization(ctx, u.OrganizationID)
-		require.NoError(t, err, "list templates")
-		require.Len(t, templates, len(autoImportTemplates), "listed templates count does not match")
-		require.ElementsMatch(t, autoImportTemplates, []coderd.AutoImportTemplate{
-			coderd.AutoImportTemplate(templates[0].Name),
-		}, "template names don't match")
+		req := codersdk.CreateFirstUserRequest{
+			Email:    "testuser@coder.com",
+			Username: "testuser",
+			Password: "testpass",
+			Trial:    true,
+		}
+		_, err := client.CreateFirstUser(ctx, req)
+		require.NoError(t, err)
+		<-called
+	})
 
-		for _, template := range templates {
-			// Check template parameters.
-			templateParams, err := client.Parameters(ctx, codersdk.ParameterTemplate, template.ID)
-			require.NoErrorf(t, err, "get template parameters for %q", template.Name)
+	t.Run("LastSeenAt", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
 
-			// Ensure all template parameters are present.
-			expectedParams := map[string]bool{}
-			switch template.Name {
-			case "kubernetes":
-				expectedParams["use_kubeconfig"] = false
-				expectedParams["namespace"] = false
-			default:
-				t.Fatalf("unexpected template name %q", template.Name)
-			}
-			for _, v := range templateParams {
-				if _, ok := expectedParams[v.Name]; !ok {
-					t.Fatalf("unexpected template parameter %q in template %q", v.Name, template.Name)
-				}
-				expectedParams[v.Name] = true
-			}
-			for k, v := range expectedParams {
-				if !v {
-					t.Fatalf("missing template parameter %q in template %q", k, template.Name)
-				}
-			}
+		client := coderdtest.New(t, nil)
+		firstUserResp := coderdtest.CreateFirstUser(t, client)
 
-			// Ensure template version is legit
-			templateVersion, err := client.TemplateVersion(ctx, template.ActiveVersionID)
-			require.NoErrorf(t, err, "get template version for %q", template.Name)
+		firstUser, err := client.User(ctx, firstUserResp.UserID.String())
+		require.NoError(t, err)
 
-			// Compare job parameters to template parameters.
-			jobParams, err := client.Parameters(ctx, codersdk.ParameterImportJob, templateVersion.Job.ID)
-			require.NoErrorf(t, err, "get template import job parameters for %q", template.Name)
-			for _, v := range jobParams {
-				if _, ok := expectedParams[v.Name]; !ok {
-					t.Fatalf("unexpected job parameter %q for template %q", v.Name, template.Name)
-				}
-				// Change it back to false so we can reuse the map
-				expectedParams[v.Name] = false
-			}
-			for k, v := range expectedParams {
-				if v {
-					t.Fatalf("missing job parameter %q for template %q", k, template.Name)
-				}
+		_ = coderdtest.CreateAnotherUser(t, client, firstUserResp.OrganizationID)
+
+		allUsersRes, err := client.Users(ctx, codersdk.UsersRequest{})
+		require.NoError(t, err)
+
+		require.Len(t, allUsersRes.Users, 2)
+
+		// We sent the "GET Users" request with the first user, but the second user
+		// should be Never since they haven't performed a request.
+		for _, user := range allUsersRes.Users {
+			if user.ID == firstUser.ID {
+				require.WithinDuration(t, firstUser.LastSeenAt, database.Now(), testutil.WaitShort)
+			} else {
+				require.Zero(t, user.LastSeenAt)
 			}
 		}
 	})
@@ -159,10 +143,9 @@ func TestPostLogin(t *testing.T) {
 		defer cancel()
 
 		req := codersdk.CreateFirstUserRequest{
-			Email:            "testuser@coder.com",
-			Username:         "testuser",
-			Password:         "testpass",
-			OrganizationName: "testorg",
+			Email:    "testuser@coder.com",
+			Username: "testuser",
+			Password: "testpass",
 		}
 		_, err := client.CreateFirstUser(ctx, req)
 		require.NoError(t, err)
@@ -216,15 +199,22 @@ func TestPostLogin(t *testing.T) {
 		defer cancel()
 
 		req := codersdk.CreateFirstUserRequest{
-			Email:            "testuser@coder.com",
-			Username:         "testuser",
-			Password:         "testpass",
-			OrganizationName: "testorg",
+			Email:    "testuser@coder.com",
+			Username: "testuser",
+			Password: "testpass",
 		}
 		_, err := client.CreateFirstUser(ctx, req)
 		require.NoError(t, err)
+
 		_, err = client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
 			Email:    req.Email,
+			Password: req.Password,
+		})
+		require.NoError(t, err)
+
+		// Login should be case insensitive
+		_, err = client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
+			Email:    strings.ToUpper(req.Email),
 			Password: req.Password,
 		})
 		require.NoError(t, err)
@@ -239,21 +229,21 @@ func TestPostLogin(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
-		split := strings.Split(client.SessionToken, "-")
+		split := strings.Split(client.SessionToken(), "-")
 		key, err := client.GetAPIKey(ctx, admin.UserID.String(), split[0])
 		require.NoError(t, err, "fetch login key")
 		require.Equal(t, int64(86400), key.LifetimeSeconds, "default should be 86400")
 
-		// Generated tokens have a longer life
-		token, err := client.CreateAPIKey(ctx, admin.UserID.String())
-		require.NoError(t, err, "make new api key")
+		// tokens have a longer life
+		token, err := client.CreateToken(ctx, codersdk.Me, codersdk.CreateTokenRequest{})
+		require.NoError(t, err, "make new token api key")
 		split = strings.Split(token.Key, "-")
 		apiKey, err := client.GetAPIKey(ctx, admin.UserID.String(), split[0])
 		require.NoError(t, err, "fetch api key")
 
-		require.True(t, apiKey.ExpiresAt.After(time.Now().Add(time.Hour*24*6)), "api key lasts more than 6 days")
-		require.True(t, apiKey.ExpiresAt.After(key.ExpiresAt.Add(time.Hour)), "api key should be longer expires")
-		require.Greater(t, apiKey.LifetimeSeconds, key.LifetimeSeconds, "api key should have longer lifetime")
+		require.True(t, apiKey.ExpiresAt.After(time.Now().Add(time.Hour*24*29)), "default tokens lasts more than 29 days")
+		require.True(t, apiKey.ExpiresAt.Before(time.Now().Add(time.Hour*24*31)), "default tokens lasts less than 31 days")
+		require.Greater(t, apiKey.LifetimeSeconds, key.LifetimeSeconds, "token should have longer lifetime")
 	})
 }
 
@@ -316,7 +306,7 @@ func TestPostLogout(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
-		keyID := strings.Split(client.SessionToken, "-")[0]
+		keyID := strings.Split(client.SessionToken(), "-")[0]
 		apiKey, err := client.GetAPIKey(ctx, admin.UserID.String(), keyID)
 		require.NoError(t, err)
 		require.Equal(t, keyID, apiKey.ID, "API key should exist in the database")
@@ -330,10 +320,16 @@ func TestPostLogout(t *testing.T) {
 		require.Equal(t, http.StatusOK, res.StatusCode)
 
 		cookies := res.Cookies()
-		require.Len(t, cookies, 1, "Exactly one cookie should be returned")
 
-		require.Equal(t, codersdk.SessionTokenKey, cookies[0].Name, "Cookie should be the auth cookie")
-		require.Equal(t, -1, cookies[0].MaxAge, "Cookie should be set to delete")
+		var found bool
+		for _, cookie := range cookies {
+			if cookie.Name == codersdk.SessionTokenKey {
+				require.Equal(t, codersdk.SessionTokenKey, cookie.Name, "Cookie should be the auth cookie")
+				require.Equal(t, -1, cookie.MaxAge, "Cookie should be set to delete")
+				found = true
+			}
+		}
+		require.True(t, found, "auth cookie should be returned")
 
 		_, err = client.GetAPIKey(ctx, admin.UserID.String(), keyID)
 		sdkErr := &codersdk.Error{}
@@ -598,6 +594,67 @@ func TestUpdateUserPassword(t *testing.T) {
 		assert.Len(t, auditor.AuditLogs, 1)
 		assert.Equal(t, database.AuditActionWrite, auditor.AuditLogs[0].Action)
 	})
+
+	t.Run("ChangingPasswordDeletesKeys", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, nil)
+		user := coderdtest.CreateFirstUser(t, client)
+		ctx, _ := testutil.Context(t)
+
+		apikey1, err := client.CreateToken(ctx, user.UserID.String(), codersdk.CreateTokenRequest{})
+		require.NoError(t, err)
+
+		apikey2, err := client.CreateToken(ctx, user.UserID.String(), codersdk.CreateTokenRequest{})
+		require.NoError(t, err)
+
+		err = client.UpdateUserPassword(ctx, "me", codersdk.UpdateUserPasswordRequest{
+			Password: "newpassword",
+		})
+		require.NoError(t, err)
+
+		// Trying to get an API key should fail since our client's token
+		// has been deleted.
+		_, err = client.GetAPIKey(ctx, user.UserID.String(), apikey1.Key)
+		require.Error(t, err)
+		cerr := coderdtest.SDKError(t, err)
+		require.Equal(t, http.StatusUnauthorized, cerr.StatusCode())
+
+		resp, err := client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
+			Email:    coderdtest.FirstUserParams.Email,
+			Password: "newpassword",
+		})
+		require.NoError(t, err)
+
+		client.SetSessionToken(resp.SessionToken)
+
+		// Trying to get an API key should fail since all keys are deleted
+		// on password change.
+		_, err = client.GetAPIKey(ctx, user.UserID.String(), apikey1.Key)
+		require.Error(t, err)
+		cerr = coderdtest.SDKError(t, err)
+		require.Equal(t, http.StatusNotFound, cerr.StatusCode())
+
+		_, err = client.GetAPIKey(ctx, user.UserID.String(), apikey2.Key)
+		require.Error(t, err)
+		cerr = coderdtest.SDKError(t, err)
+		require.Equal(t, http.StatusNotFound, cerr.StatusCode())
+	})
+
+	t.Run("PasswordsMustDiffer", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, nil)
+		_ = coderdtest.CreateFirstUser(t, client)
+		ctx, _ := testutil.Context(t)
+
+		err := client.UpdateUserPassword(ctx, "me", codersdk.UpdateUserPasswordRequest{
+			Password: coderdtest.FirstUserParams.Password,
+		})
+		require.Error(t, err)
+		cerr := coderdtest.SDKError(t, err)
+		require.Equal(t, http.StatusBadRequest, cerr.StatusCode())
+	})
 }
 
 func TestGrantSiteRoles(t *testing.T) {
@@ -685,15 +742,6 @@ func TestGrantSiteRoles(t *testing.T) {
 			OrgID:        randOrg.ID,
 			AssignToUser: randOrgUser.ID.String(),
 			Roles:        []string{rbac.RoleOrgMember(randOrg.ID)},
-			Error:        true,
-			StatusCode:   http.StatusForbidden,
-		},
-		{
-			Name:         "MemberAssignMember",
-			Client:       member,
-			OrgID:        first.OrganizationID,
-			AssignToUser: first.UserID.String(),
-			Roles:        []string{},
 			Error:        true,
 			StatusCode:   http.StatusForbidden,
 		},
@@ -792,7 +840,7 @@ func TestInitialRoles(t *testing.T) {
 	}, "should be a member and admin")
 
 	require.ElementsMatch(t, roles.OrganizationRoles[first.OrganizationID], []string{
-		rbac.RoleOrgAdmin(first.OrganizationID),
+		rbac.RoleOrgMember(first.OrganizationID),
 	}, "should be a member and admin")
 }
 
@@ -1079,7 +1127,7 @@ func TestUsersFilter(t *testing.T) {
 					exp = append(exp, made)
 				}
 			}
-			require.ElementsMatch(t, exp, matched, "expected workspaces returned")
+			require.ElementsMatch(t, exp, matched.Users, "expected workspaces returned")
 		})
 	}
 }
@@ -1101,10 +1149,10 @@ func TestGetUsers(t *testing.T) {
 			OrganizationID: user.OrganizationID,
 		})
 		// No params is all users
-		users, err := client.Users(ctx, codersdk.UsersRequest{})
+		res, err := client.Users(ctx, codersdk.UsersRequest{})
 		require.NoError(t, err)
-		require.Len(t, users, 2)
-		require.Len(t, users[0].OrganizationIDs, 1)
+		require.Len(t, res.Users, 2)
+		require.Len(t, res.Users[0].OrganizationIDs, 1)
 	})
 	t.Run("ActiveUsers", func(t *testing.T) {
 		t.Parallel()
@@ -1140,44 +1188,80 @@ func TestGetUsers(t *testing.T) {
 		_, err = client.UpdateUserStatus(ctx, alice.Username, codersdk.UserStatusSuspended)
 		require.NoError(t, err)
 
-		users, err := client.Users(ctx, codersdk.UsersRequest{
+		res, err := client.Users(ctx, codersdk.UsersRequest{
 			Status: codersdk.UserStatusActive,
 		})
 		require.NoError(t, err)
-		require.ElementsMatch(t, active, users)
+		require.ElementsMatch(t, active, res.Users)
 	})
 }
 
-func TestPostAPIKey(t *testing.T) {
+func TestGetUsersPagination(t *testing.T) {
 	t.Parallel()
-	t.Run("InvalidUser", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
+	client := coderdtest.New(t, nil)
+	first := coderdtest.CreateFirstUser(t, client)
 
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+	defer cancel()
 
-		client.SessionToken = ""
-		_, err := client.CreateAPIKey(ctx, codersdk.Me)
-		var apiErr *codersdk.Error
-		require.ErrorAs(t, err, &apiErr)
-		require.Equal(t, http.StatusUnauthorized, apiErr.StatusCode())
+	_, err := client.User(ctx, first.UserID.String())
+	require.NoError(t, err, "")
+
+	_, err = client.CreateUser(ctx, codersdk.CreateUserRequest{
+		Email:          "alice@email.com",
+		Username:       "alice",
+		Password:       "password",
+		OrganizationID: first.OrganizationID,
 	})
+	require.NoError(t, err)
 
-	t.Run("Success", func(t *testing.T) {
-		t.Parallel()
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
+	res, err := client.Users(ctx, codersdk.UsersRequest{})
+	require.NoError(t, err)
+	require.Len(t, res.Users, 2)
+	require.Equal(t, res.Count, 2)
 
-		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-		defer cancel()
-
-		apiKey, err := client.CreateAPIKey(ctx, codersdk.Me)
-		require.NotNil(t, apiKey)
-		require.GreaterOrEqual(t, len(apiKey.Key), 2)
-		require.NoError(t, err)
+	res, err = client.Users(ctx, codersdk.UsersRequest{
+		Pagination: codersdk.Pagination{
+			Limit: 1,
+		},
 	})
+	require.NoError(t, err)
+	require.Len(t, res.Users, 1)
+	require.Equal(t, res.Count, 2)
+
+	res, err = client.Users(ctx, codersdk.UsersRequest{
+		Pagination: codersdk.Pagination{
+			Offset: 1,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Users, 1)
+	require.Equal(t, res.Count, 2)
+
+	// if offset is higher than the count postgres returns an empty array
+	// and not an ErrNoRows error. This also means the count must be 0.
+	res, err = client.Users(ctx, codersdk.UsersRequest{
+		Pagination: codersdk.Pagination{
+			Offset: 3,
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Users, 0)
+	require.Equal(t, res.Count, 0)
+}
+
+func TestPostTokens(t *testing.T) {
+	t.Parallel()
+	client := coderdtest.New(t, nil)
+	_ = coderdtest.CreateFirstUser(t, client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+	defer cancel()
+
+	apiKey, err := client.CreateToken(ctx, codersdk.Me, codersdk.CreateTokenRequest{})
+	require.NotNil(t, apiKey)
+	require.GreaterOrEqual(t, len(apiKey.Key), 2)
+	require.NoError(t, err)
 }
 
 func TestWorkspacesByUser(t *testing.T) {
@@ -1190,11 +1274,11 @@ func TestWorkspacesByUser(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
-		workspaces, err := client.Workspaces(ctx, codersdk.WorkspaceFilter{
+		res, err := client.Workspaces(ctx, codersdk.WorkspaceFilter{
 			Owner: codersdk.Me,
 		})
 		require.NoError(t, err)
-		require.Len(t, workspaces, 0)
+		require.Len(t, res.Workspaces, 0)
 	})
 	t.Run("Access", func(t *testing.T) {
 		t.Parallel()
@@ -1218,19 +1302,19 @@ func TestWorkspacesByUser(t *testing.T) {
 		require.NoError(t, err)
 
 		newUserClient := codersdk.New(client.URL)
-		newUserClient.SessionToken = auth.SessionToken
+		newUserClient.SetSessionToken(auth.SessionToken)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
 		coderdtest.AwaitTemplateVersionJob(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 		coderdtest.CreateWorkspace(t, client, user.OrganizationID, template.ID)
 
-		workspaces, err := newUserClient.Workspaces(ctx, codersdk.WorkspaceFilter{Owner: codersdk.Me})
+		res, err := newUserClient.Workspaces(ctx, codersdk.WorkspaceFilter{Owner: codersdk.Me})
 		require.NoError(t, err)
-		require.Len(t, workspaces, 0)
+		require.Len(t, res.Workspaces, 0)
 
-		workspaces, err = client.Workspaces(ctx, codersdk.WorkspaceFilter{Owner: codersdk.Me})
+		res, err = client.Workspaces(ctx, codersdk.WorkspaceFilter{Owner: codersdk.Me})
 		require.NoError(t, err)
-		require.Len(t, workspaces, 1)
+		require.Len(t, res.Workspaces, 1)
 	})
 }
 
@@ -1240,7 +1324,8 @@ func TestWorkspacesByUser(t *testing.T) {
 // This is mainly to confirm the db fake has the same behavior.
 func TestSuspendedPagination(t *testing.T) {
 	t.Parallel()
-	client := coderdtest.New(t, &coderdtest.Options{APIRateLimit: -1})
+	t.Skip("This fails when two users are created at the exact same time. The reason is unknown... See: https://github.com/coder/coder/actions/runs/3057047622/jobs/4931863163")
+	client := coderdtest.New(t, nil)
 	coderdtest.CreateFirstUser(t, client)
 
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
@@ -1278,14 +1363,14 @@ func TestSuspendedPagination(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	require.Equal(t, expected, page, "expected page")
+	require.Equal(t, expected, page.Users, "expected page")
 }
 
 // TestPaginatedUsers creates a list of users, then tries to paginate through
 // them using different page sizes.
 func TestPaginatedUsers(t *testing.T) {
 	t.Parallel()
-	client := coderdtest.New(t, &coderdtest.Options{APIRateLimit: -1})
+	client := coderdtest.New(t, nil)
 	coderdtest.CreateFirstUser(t, client)
 
 	// This test takes longer than a long time.
@@ -1404,15 +1489,15 @@ func assertPagination(ctx context.Context, t *testing.T, client *codersdk.Client
 		},
 	}))
 	require.NoError(t, err, "first page")
-	require.Equalf(t, page, allUsers[:limit], "first page, limit=%d", limit)
-	count += len(page)
+	require.Equalf(t, page.Users, allUsers[:limit], "first page, limit=%d", limit)
+	count += len(page.Users)
 
 	for {
-		if len(page) == 0 {
+		if len(page.Users) == 0 {
 			break
 		}
 
-		afterCursor := page[len(page)-1].ID
+		afterCursor := page.Users[len(page.Users)-1].ID
 		// Assert each page is the next expected page
 		// This is using a cursor, and only works if all users created_at
 		// is unique.
@@ -1439,8 +1524,8 @@ func assertPagination(ctx context.Context, t *testing.T, client *codersdk.Client
 		} else {
 			expected = allUsers[count : count+limit]
 		}
-		require.Equalf(t, page, expected, "next users, after=%s, limit=%d", afterCursor, limit)
-		require.Equalf(t, offsetPage, expected, "offset users, offset=%d, limit=%d", count, limit)
+		require.Equalf(t, page.Users, expected, "next users, after=%s, limit=%d", afterCursor, limit)
+		require.Equalf(t, offsetPage.Users, expected, "offset users, offset=%d, limit=%d", count, limit)
 
 		// Also check the before
 		prevPage, err := client.Users(ctx, opt(codersdk.UsersRequest{
@@ -1450,8 +1535,8 @@ func assertPagination(ctx context.Context, t *testing.T, client *codersdk.Client
 			},
 		}))
 		require.NoError(t, err, "prev page")
-		require.Equal(t, allUsers[count-limit:count], prevPage, "prev users")
-		count += len(page)
+		require.Equal(t, allUsers[count-limit:count], prevPage.Users, "prev users")
+		count += len(page.Users)
 	}
 }
 

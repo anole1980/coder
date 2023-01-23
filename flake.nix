@@ -16,7 +16,9 @@
         formatter = pkgs.nixpkgs-fmt;
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
+            bash
             bat
+            cairo
             drpc.defaultPackage.${system}
             exa
             getopt
@@ -33,7 +35,10 @@
             nodejs
             openssh
             openssl
+            pango
+            pixman
             postgresql
+            pkg-config
             protoc-gen-go
             ripgrep
             shellcheck
@@ -42,6 +47,7 @@
             terraform
             typos
             yarn
+            yq
             zip
             zstd
           ];

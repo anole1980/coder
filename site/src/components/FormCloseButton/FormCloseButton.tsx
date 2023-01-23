@@ -1,14 +1,14 @@
 import IconButton from "@material-ui/core/IconButton"
 import { makeStyles } from "@material-ui/core/styles"
 import Typography from "@material-ui/core/Typography"
-import React, { useEffect } from "react"
+import { useEffect, FC, PropsWithChildren } from "react"
 import { CloseIcon } from "../Icons/CloseIcon"
 
 export interface FormCloseButtonProps {
   onClose: () => void
 }
 
-export const FormCloseButton: React.FC<React.PropsWithChildren<FormCloseButtonProps>> = ({
+export const FormCloseButton: FC<PropsWithChildren<FormCloseButtonProps>> = ({
   onClose,
 }) => {
   const styles = useStyles()
@@ -46,6 +46,11 @@ const useStyles = makeStyles((theme) => ({
     color: theme.palette.text.primary,
     "&:hover": {
       opacity: 1,
+    },
+
+    [theme.breakpoints.down("sm")]: {
+      top: theme.spacing(1),
+      right: theme.spacing(1),
     },
   },
   label: {

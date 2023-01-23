@@ -48,9 +48,9 @@ func prepareTestGitSSH(ctx context.Context, t *testing.T) (*codersdk.Client, str
 	// setup template
 	agentToken := uuid.NewString()
 	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-		Parse:           echo.ParseComplete,
-		ProvisionDryRun: echo.ProvisionComplete,
-		Provision: []*proto.Provision_Response{{
+		Parse:         echo.ParseComplete,
+		ProvisionPlan: echo.ProvisionComplete,
+		ProvisionApply: []*proto.Provision_Response{{
 			Type: &proto.Provision_Response_Complete{
 				Complete: &proto.Provision_Complete{
 					Resources: []*proto.Resource{{
@@ -72,7 +72,7 @@ func prepareTestGitSSH(ctx context.Context, t *testing.T) (*codersdk.Client, str
 	coderdtest.AwaitWorkspaceBuildJob(t, client, workspace.LatestBuild.ID)
 
 	// start workspace agent
-	cmd, root := clitest.New(t, "agent", "--agent-token", agentToken, "--agent-url", client.URL.String(), "--wireguard=false")
+	cmd, root := clitest.New(t, "agent", "--agent-token", agentToken, "--agent-url", client.URL.String())
 	agentClient := client
 	clitest.SetupConfig(t, agentClient, root)
 
@@ -81,16 +81,7 @@ func prepareTestGitSSH(ctx context.Context, t *testing.T) (*codersdk.Client, str
 		errC <- cmd.ExecuteContext(ctx)
 	}()
 	t.Cleanup(func() { require.NoError(t, <-errC) })
-
-	coderdtest.AwaitWorkspaceAgents(t, client, workspace.LatestBuild.ID)
-	resources, err := client.WorkspaceResourcesByBuild(ctx, workspace.LatestBuild.ID)
-	require.NoError(t, err)
-	dialer, err := client.DialWorkspaceAgent(ctx, resources[0].Agents[0].ID, nil)
-	require.NoError(t, err)
-	defer dialer.Close()
-	_, err = dialer.Ping()
-	require.NoError(t, err)
-
+	coderdtest.AwaitWorkspaceAgents(t, client, workspace.ID)
 	return agentClient, agentToken, pubkey
 }
 

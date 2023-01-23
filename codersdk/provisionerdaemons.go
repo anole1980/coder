@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -12,20 +13,22 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/hashicorp/yamux"
 	"golang.org/x/xerrors"
 	"nhooyr.io/websocket"
+
+	"github.com/coder/coder/provisionerd/proto"
+	"github.com/coder/coder/provisionersdk"
 )
 
 type LogSource string
 
-const (
-	LogSourceProvisionerDaemon LogSource = "provisioner_daemon"
-	LogSourceProvisioner       LogSource = "provisioner"
-)
-
 type LogLevel string
 
 const (
+	LogSourceProvisionerDaemon LogSource = "provisioner_daemon"
+	LogSourceProvisioner       LogSource = "provisioner"
+
 	LogLevelTrace LogLevel = "trace"
 	LogLevelDebug LogLevel = "debug"
 	LogLevelInfo  LogLevel = "info"
@@ -34,11 +37,12 @@ const (
 )
 
 type ProvisionerDaemon struct {
-	ID           uuid.UUID         `json:"id"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    sql.NullTime      `json:"updated_at"`
+	ID           uuid.UUID         `json:"id" format:"uuid"`
+	CreatedAt    time.Time         `json:"created_at" format:"date-time"`
+	UpdatedAt    sql.NullTime      `json:"updated_at" format:"date-time"`
 	Name         string            `json:"name"`
 	Provisioners []ProvisionerType `json:"provisioners"`
+	Tags         map[string]string `json:"tags"`
 }
 
 // ProvisionerJobStatus represents the at-time state of a job.
@@ -62,22 +66,26 @@ const (
 	ProvisionerJobFailed    ProvisionerJobStatus = "failed"
 )
 
+// ProvisionerJob describes the job executed by the provisioning daemon.
 type ProvisionerJob struct {
-	ID            uuid.UUID            `json:"id"`
-	CreatedAt     time.Time            `json:"created_at"`
-	StartedAt     *time.Time           `json:"started_at,omitempty"`
-	CompletedAt   *time.Time           `json:"completed_at,omitempty"`
-	Error         string               `json:"error,omitempty"`
-	Status        ProvisionerJobStatus `json:"status"`
-	WorkerID      *uuid.UUID           `json:"worker_id,omitempty"`
-	StorageSource string               `json:"storage_source"`
+	ID          uuid.UUID            `json:"id" format:"uuid"`
+	CreatedAt   time.Time            `json:"created_at" format:"date-time"`
+	StartedAt   *time.Time           `json:"started_at,omitempty" format:"date-time"`
+	CompletedAt *time.Time           `json:"completed_at,omitempty" format:"date-time"`
+	CanceledAt  *time.Time           `json:"canceled_at,omitempty" format:"date-time"`
+	Error       string               `json:"error,omitempty"`
+	Status      ProvisionerJobStatus `json:"status" enums:"pending,running,succeeded,canceling,canceled,failed"`
+	WorkerID    *uuid.UUID           `json:"worker_id,omitempty" format:"uuid"`
+	FileID      uuid.UUID            `json:"file_id" format:"uuid"`
+	Tags        map[string]string    `json:"tags"`
 }
 
+// ProvisionerJobLog represents the provisioner log entry annotated with source and level.
 type ProvisionerJobLog struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64     `json:"id"`
+	CreatedAt time.Time `json:"created_at" format:"date-time"`
 	Source    LogSource `json:"log_source"`
-	Level     LogLevel  `json:"log_level"`
+	Level     LogLevel  `json:"log_level" enums:"trace,debug,info,warn,error"`
 	Stage     string    `json:"stage"`
 	Output    string    `json:"output"`
 }
@@ -85,10 +93,10 @@ type ProvisionerJobLog struct {
 // provisionerJobLogsBefore provides log output that occurred before a time.
 // This is abstracted from a specific job type to provide consistency between
 // APIs. Logs is the only shared route between jobs.
-func (c *Client) provisionerJobLogsBefore(ctx context.Context, path string, before time.Time) ([]ProvisionerJobLog, error) {
+func (c *Client) provisionerJobLogsBefore(ctx context.Context, path string, before int64) ([]ProvisionerJobLog, error) {
 	values := url.Values{}
-	if !before.IsZero() {
-		values["before"] = []string{strconv.FormatInt(before.UTC().UnixMilli(), 10)}
+	if before != 0 {
+		values["before"] = []string{strconv.FormatInt(before, 10)}
 	}
 	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("%s?%s", path, values.Encode()), nil)
 	if err != nil {
@@ -104,22 +112,22 @@ func (c *Client) provisionerJobLogsBefore(ctx context.Context, path string, befo
 }
 
 // provisionerJobLogsAfter streams logs that occurred after a specific time.
-func (c *Client) provisionerJobLogsAfter(ctx context.Context, path string, after time.Time) (<-chan ProvisionerJobLog, error) {
+func (c *Client) provisionerJobLogsAfter(ctx context.Context, path string, after int64) (<-chan ProvisionerJobLog, io.Closer, error) {
 	afterQuery := ""
-	if !after.IsZero() {
-		afterQuery = fmt.Sprintf("&after=%d", after.UTC().UnixMilli())
+	if after != 0 {
+		afterQuery = fmt.Sprintf("&after=%d", after)
 	}
 	followURL, err := c.URL.Parse(fmt.Sprintf("%s?follow%s", path, afterQuery))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	jar, err := cookiejar.New(nil)
 	if err != nil {
-		return nil, xerrors.Errorf("create cookie jar: %w", err)
+		return nil, nil, xerrors.Errorf("create cookie jar: %w", err)
 	}
 	jar.SetCookies(followURL, []*http.Cookie{{
 		Name:  SessionTokenKey,
-		Value: c.SessionToken,
+		Value: c.SessionToken(),
 	}})
 	httpClient := &http.Client{
 		Jar: jar,
@@ -129,12 +137,18 @@ func (c *Client) provisionerJobLogsAfter(ctx context.Context, path string, after
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
-		return nil, readBodyAsError(res)
+		if res == nil {
+			return nil, nil, err
+		}
+		return nil, nil, readBodyAsError(res)
 	}
 	logs := make(chan ProvisionerJobLog)
 	decoder := json.NewDecoder(websocket.NetConn(ctx, conn, websocket.MessageText))
+	closed := make(chan struct{})
 	go func() {
+		defer close(closed)
 		defer close(logs)
+		defer conn.Close(websocket.StatusGoingAway, "")
 		var log ProvisionerJobLog
 		for {
 			err = decoder.Decode(&log)
@@ -148,5 +162,57 @@ func (c *Client) provisionerJobLogsAfter(ctx context.Context, path string, after
 			}
 		}
 	}()
-	return logs, nil
+	return logs, closeFunc(func() error {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		<-closed
+		return nil
+	}), nil
+}
+
+// ListenProvisionerDaemon returns the gRPC service for a provisioner daemon implementation.
+func (c *Client) ServeProvisionerDaemon(ctx context.Context, organization uuid.UUID, provisioners []ProvisionerType, tags map[string]string) (proto.DRPCProvisionerDaemonClient, error) {
+	serverURL, err := c.URL.Parse(fmt.Sprintf("/api/v2/organizations/%s/provisionerdaemons/serve", organization))
+	if err != nil {
+		return nil, xerrors.Errorf("parse url: %w", err)
+	}
+	query := serverURL.Query()
+	for _, provisioner := range provisioners {
+		query.Add("provisioner", string(provisioner))
+	}
+	for key, value := range tags {
+		query.Add("tag", fmt.Sprintf("%s=%s", key, value))
+	}
+	serverURL.RawQuery = query.Encode()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, xerrors.Errorf("create cookie jar: %w", err)
+	}
+	jar.SetCookies(serverURL, []*http.Cookie{{
+		Name:  SessionTokenKey,
+		Value: c.SessionToken(),
+	}})
+	httpClient := &http.Client{
+		Jar: jar,
+	}
+	conn, res, err := websocket.Dial(ctx, serverURL.String(), &websocket.DialOptions{
+		HTTPClient: httpClient,
+		// Need to disable compression to avoid a data-race.
+		CompressionMode: websocket.CompressionDisabled,
+	})
+	if err != nil {
+		if res == nil {
+			return nil, err
+		}
+		return nil, readBodyAsError(res)
+	}
+	// Align with the frame size of yamux.
+	conn.SetReadLimit(256 * 1024)
+
+	config := yamux.DefaultConfig()
+	config.LogOutput = io.Discard
+	session, err := yamux.Client(websocket.NetConn(ctx, conn, websocket.MessageBinary), config)
+	if err != nil {
+		return nil, xerrors.Errorf("multiplex client: %w", err)
+	}
+	return proto.NewDRPCProvisionerDaemonClient(provisionersdk.MultiplexedConn(session)), nil
 }

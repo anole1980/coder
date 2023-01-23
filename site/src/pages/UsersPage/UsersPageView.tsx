@@ -1,42 +1,42 @@
-import Button from "@material-ui/core/Button"
-import AddCircleOutline from "@material-ui/icons/AddCircleOutline"
+import { PaginationWidget } from "components/PaginationWidget/PaginationWidget"
 import { FC } from "react"
+import { PaginationMachineRef } from "xServices/pagination/paginationXService"
 import * as TypesGen from "../../api/typesGenerated"
-import { Margins } from "../../components/Margins/Margins"
-import { PageHeader, PageHeaderTitle } from "../../components/PageHeader/PageHeader"
 import { SearchBarWithFilter } from "../../components/SearchBarWithFilter/SearchBarWithFilter"
 import { UsersTable } from "../../components/UsersTable/UsersTable"
 import { userFilterQuery } from "../../util/filters"
 
 export const Language = {
-  pageTitle: "Users",
-  createButton: "New user",
   activeUsersFilterName: "Active users",
   allUsersFilterName: "All users",
 }
 export interface UsersPageViewProps {
   users?: TypesGen.User[]
+  count?: number
   roles?: TypesGen.AssignableRoles[]
   filter?: string
   error?: unknown
   isUpdatingUserRoles?: boolean
   canEditUsers?: boolean
-  canCreateUser?: boolean
   isLoading?: boolean
-  openUserCreationDialog: () => void
   onSuspendUser: (user: TypesGen.User) => void
   onDeleteUser: (user: TypesGen.User) => void
   onListWorkspaces: (user: TypesGen.User) => void
   onActivateUser: (user: TypesGen.User) => void
   onResetUserPassword: (user: TypesGen.User) => void
-  onUpdateUserRoles: (user: TypesGen.User, roles: TypesGen.Role["name"][]) => void
+  onUpdateUserRoles: (
+    user: TypesGen.User,
+    roles: TypesGen.Role["name"][],
+  ) => void
   onFilter: (query: string) => void
+  paginationRef: PaginationMachineRef
+  isNonInitialPage: boolean
 }
 
 export const UsersPageView: FC<React.PropsWithChildren<UsersPageViewProps>> = ({
   users,
+  count,
   roles,
-  openUserCreationDialog,
   onSuspendUser,
   onDeleteUser,
   onListWorkspaces,
@@ -46,10 +46,11 @@ export const UsersPageView: FC<React.PropsWithChildren<UsersPageViewProps>> = ({
   error,
   isUpdatingUserRoles,
   canEditUsers,
-  canCreateUser,
   isLoading,
   filter,
   onFilter,
+  paginationRef,
+  isNonInitialPage,
 }) => {
   const presetFilters = [
     { query: userFilterQuery.active, name: Language.activeUsersFilterName },
@@ -57,27 +58,13 @@ export const UsersPageView: FC<React.PropsWithChildren<UsersPageViewProps>> = ({
   ]
 
   return (
-    <Margins>
-      <PageHeader
-        actions={
-          canCreateUser ? (
-            <Button onClick={openUserCreationDialog} startIcon={<AddCircleOutline />}>
-              {Language.createButton}
-            </Button>
-          ) : undefined
-        }
-      >
-        <PageHeaderTitle>{Language.pageTitle}</PageHeaderTitle>
-      </PageHeader>
-
-      <div style={{ marginTop: "15px" }}>
-        <SearchBarWithFilter
-          filter={filter}
-          onFilter={onFilter}
-          presetFilters={presetFilters}
-          error={error}
-        />
-      </div>
+    <>
+      <SearchBarWithFilter
+        filter={filter}
+        onFilter={onFilter}
+        presetFilters={presetFilters}
+        error={error}
+      />
 
       <UsersTable
         users={users}
@@ -91,7 +78,10 @@ export const UsersPageView: FC<React.PropsWithChildren<UsersPageViewProps>> = ({
         isUpdatingUserRoles={isUpdatingUserRoles}
         canEditUsers={canEditUsers}
         isLoading={isLoading}
+        isNonInitialPage={isNonInitialPage}
       />
-    </Margins>
+
+      <PaginationWidget numRecords={count} paginationRef={paginationRef} />
+    </>
   )
 }

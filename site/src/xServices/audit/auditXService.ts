@@ -1,37 +1,53 @@
-import { getAuditLogs, getAuditLogsCount } from "api/api"
+import { getAuditLogs } from "api/api"
 import { getErrorMessage } from "api/errors"
-import { AuditLog } from "api/typesGenerated"
+import { AuditLog, AuditLogResponse } from "api/typesGenerated"
 import { displayError } from "components/GlobalSnackbar/utils"
-import { assign, createMachine } from "xstate"
+import { getPaginationData } from "components/PaginationWidget/utils"
+import {
+  PaginationContext,
+  PaginationMachineRef,
+  paginationMachine,
+} from "xServices/pagination/paginationXService"
+import { assign, createMachine, spawn, send } from "xstate"
+
+const auditPaginationId = "auditPagination"
+
+interface AuditContext {
+  auditLogs?: AuditLog[]
+  count?: number
+  filter: string
+  paginationContext: PaginationContext
+  paginationRef?: PaginationMachineRef
+}
 
 export const auditMachine = createMachine(
   {
     id: "auditMachine",
+    predictableActionArguments: true,
+    tsTypes: {} as import("./auditXService.typegen").Typegen0,
     schema: {
-      context: {} as { auditLogs?: AuditLog[]; count?: number; page: number; limit: number },
+      context: {} as AuditContext,
       services: {} as {
         loadAuditLogsAndCount: {
-          data: {
-            auditLogs: AuditLog[]
-            count: number
-          }
+          data: AuditLogResponse
         }
       },
       events: {} as
         | {
-            type: "NEXT"
+            type: "UPDATE_PAGE"
+            page: string
           }
         | {
-            type: "PREVIOUS"
-          }
-        | {
-            type: "GO_TO_PAGE"
-            page: number
+            type: "FILTER"
+            filter: string
           },
     },
-    tsTypes: {} as import("./auditXService.typegen").Typegen0,
-    initial: "loading",
+    initial: "startPagination",
     states: {
+      startPagination: {
+        entry: "assignPaginationRef",
+        always: "loading",
+      },
       loading: {
         // Right now, XState doesn't a good job with state + context typing so
         // this forces the AuditPageView to showing the loading state when the
@@ -40,34 +56,26 @@ export const auditMachine = createMachine(
         invoke: {
           src: "loadAuditLogsAndCount",
           onDone: {
-            target: "success",
+            target: "idle",
             actions: ["assignAuditLogsAndCount"],
           },
           onError: {
-            target: "error",
+            target: "idle",
             actions: ["displayApiError"],
           },
         },
-        onDone: "success",
+        onDone: "idle",
       },
-      success: {
+      idle: {
         on: {
-          NEXT: {
-            actions: ["assignNextPage", "onPageChange"],
+          UPDATE_PAGE: {
+            actions: ["updateURL"],
             target: "loading",
           },
-          PREVIOUS: {
-            actions: ["assignPreviousPage", "onPageChange"],
-            target: "loading",
-          },
-          GO_TO_PAGE: {
-            actions: ["assignPage", "onPageChange"],
-            target: "loading",
+          FILTER: {
+            actions: ["assignFilter", "sendResetPage"],
           },
         },
-      },
-      error: {
-        type: "final",
       },
     },
   },
@@ -77,37 +85,39 @@ export const auditMachine = createMachine(
         auditLogs: (_) => undefined,
       }),
       assignAuditLogsAndCount: assign({
-        auditLogs: (_, event) => event.data.auditLogs,
+        auditLogs: (_, event) => event.data.audit_logs,
         count: (_, event) => event.data.count,
       }),
-      assignNextPage: assign({
-        page: ({ page }) => page + 1,
+      assignPaginationRef: assign({
+        paginationRef: (context) =>
+          spawn(
+            paginationMachine.withContext(context.paginationContext),
+            auditPaginationId,
+          ),
       }),
-      assignPreviousPage: assign({
-        page: ({ page }) => page - 1,
-      }),
-      assignPage: assign({
-        page: (_, { page }) => page,
+      assignFilter: assign({
+        filter: (_, { filter }) => filter,
       }),
       displayApiError: (_, event) => {
-        const message = getErrorMessage(event.data, "Error on loading audit logs.")
+        const message = getErrorMessage(
+          event.data,
+          "Error on loading audit logs.",
+        )
         displayError(message)
       },
+      sendResetPage: send({ type: "RESET_PAGE" }, { to: auditPaginationId }),
     },
     services: {
-      loadAuditLogsAndCount: async ({ page, limit }, _) => {
-        const [auditLogs, count] = await Promise.all([
-          getAuditLogs({
-            // The page in the API starts at 0
-            offset: (page - 1) * limit,
+      loadAuditLogsAndCount: async (context) => {
+        if (context.paginationRef) {
+          const { offset, limit } = getPaginationData(context.paginationRef)
+          return getAuditLogs({
+            offset,
             limit,
-          }).then((data) => data.audit_logs),
-          getAuditLogsCount().then((data) => data.count),
-        ])
-
-        return {
-          auditLogs,
-          count,
+            q: context.filter,
+          })
+        } else {
+          throw new Error("Cannot get audit logs without pagination data")
         }
       },
     },

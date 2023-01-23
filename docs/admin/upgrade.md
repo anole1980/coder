@@ -22,10 +22,11 @@ curl -L https://coder.com/install.sh | sh
 ```
 
 The script will unpack the new `coder` binary version over the one currently installed.
-Next, you can restart Coder with the following command (if running it as a system
+Next, you can restart Coder with the following commands (if running it as a system
 service):
 
 ```console
+systemctl daemon-reload
 systemctl restart coder
 ```
 
@@ -40,4 +41,4 @@ docker-compose pull coder && docker-compose up coder -d
 
 ## Up Next
 
-- [Learn how to enable Enterprise features](./enterprise.md).
+- [Learn how to enable Enterprise features](../enterprise.md).

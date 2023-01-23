@@ -2,17 +2,15 @@ import { useMachine } from "@xstate/react"
 import { useOrganizationId } from "hooks/useOrganizationId"
 import { FC } from "react"
 import { Helmet } from "react-helmet-async"
+import { useTranslation } from "react-i18next"
 import { useNavigate, useParams } from "react-router-dom"
 import { pageTitle } from "util/page"
 import { templateSettingsMachine } from "xServices/templateSettings/templateSettingsXService"
 import { TemplateSettingsPageView } from "./TemplateSettingsPageView"
 
-const Language = {
-  title: "Template Settings",
-}
-
 export const TemplateSettingsPage: FC = () => {
   const { template: templateName } = useParams() as { template: string }
+  const { t } = useTranslation("templateSettingsPage")
   const navigate = useNavigate()
   const organizationId = useOrganizationId()
   const [state, send] = useMachine(templateSettingsMachine, {
@@ -24,12 +22,17 @@ export const TemplateSettingsPage: FC = () => {
       },
     },
   })
-  const { templateSettings: template, saveTemplateSettingsError, getTemplateError } = state.context
+  const {
+    templateSettings: template,
+    saveTemplateSettingsError,
+    getTemplateError,
+    deleteTemplateError,
+  } = state.context
 
   return (
     <>
       <Helmet>
-        <title>{pageTitle(Language.title)}</title>
+        <title>{pageTitle(t("title"))}</title>
       </Helmet>
       <TemplateSettingsPageView
         isSubmitting={state.hasTag("submitting")}
@@ -37,6 +40,7 @@ export const TemplateSettingsPage: FC = () => {
         errors={{
           getTemplateError,
           saveTemplateSettingsError,
+          deleteTemplateError,
         }}
         onCancel={() => {
           navigate(`/templates/${templateName}`)
@@ -44,6 +48,14 @@ export const TemplateSettingsPage: FC = () => {
         onSubmit={(templateSettings) => {
           send({ type: "SAVE", templateSettings })
         }}
+        onDelete={() => {
+          send("DELETE")
+        }}
+        onConfirmDelete={() => send("CONFIRM_DELETE")}
+        onCancelDelete={() => send("CANCEL_DELETE")}
+        isConfirmingDelete={state.matches("confirmingDelete")}
+        isDeleting={state.matches("deleting")}
+        isDeleted={state.matches("deleted")}
       />
     </>
   )

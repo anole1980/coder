@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/coder/agent"
+	"github.com/coder/coder/codersdk"
 )
 
 // New creates a new workspace connection cache that closes
@@ -32,11 +32,11 @@ func New(dialer Dialer, inactiveTimeout time.Duration) *Cache {
 }
 
 // Dialer creates a new agent connection by ID.
-type Dialer func(r *http.Request, id uuid.UUID) (agent.Conn, error)
+type Dialer func(r *http.Request, id uuid.UUID) (*codersdk.AgentConn, error)
 
 // Conn wraps an agent connection with a reusable HTTP transport.
 type Conn struct {
-	agent.Conn
+	*codersdk.AgentConn
 
 	locks         atomic.Uint64
 	timeoutMutex  sync.Mutex
@@ -59,7 +59,7 @@ func (c *Conn) CloseWithError(err error) error {
 	if c.timeout != nil {
 		c.timeout.Stop()
 	}
-	return c.Conn.CloseWithError(err)
+	return c.AgentConn.CloseWithError(err)
 }
 
 type Cache struct {
@@ -86,8 +86,18 @@ func (c *Cache) Acquire(r *http.Request, id uuid.UUID) (*Conn, func(), error) {
 		// A singleflight group is used to allow for concurrent requests to the
 		// same identifier to resolve.
 		rawConn, err, _ = c.connGroup.Do(id.String(), func() (interface{}, error) {
+			c.closeMutex.Lock()
+			select {
+			case <-c.closed:
+				c.closeMutex.Unlock()
+				return nil, xerrors.New("closed")
+			default:
+			}
+			c.closeGroup.Add(1)
+			c.closeMutex.Unlock()
 			agentConn, err := c.dialer(r, id)
 			if err != nil {
+				c.closeGroup.Done()
 				return nil, xerrors.Errorf("dial: %w", err)
 			}
 			timeoutCtx, timeoutCancelFunc := context.WithCancel(context.Background())
@@ -98,13 +108,10 @@ func (c *Cache) Acquire(r *http.Request, id uuid.UUID) (*Conn, func(), error) {
 			transport := defaultTransport.Clone()
 			transport.DialContext = agentConn.DialContext
 			conn := &Conn{
-				Conn:          agentConn,
+				AgentConn:     agentConn,
 				timeoutCancel: timeoutCancelFunc,
 				transport:     transport,
 			}
-			c.closeMutex.Lock()
-			c.closeGroup.Add(1)
-			c.closeMutex.Unlock()
 			go func() {
 				defer c.closeGroup.Done()
 				var err error

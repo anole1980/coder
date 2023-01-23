@@ -3,7 +3,7 @@ import { makeStyles } from "@material-ui/core/styles"
 import { CodeExample } from "components/CodeExample/CodeExample"
 import { SignInLayout } from "components/SignInLayout/SignInLayout"
 import { Welcome } from "components/Welcome/Welcome"
-import React from "react"
+import { FC } from "react"
 import { Link as RouterLink } from "react-router-dom"
 import { FullScreenLoader } from "../../components/Loader/FullScreenLoader"
 
@@ -11,7 +11,7 @@ export interface CliAuthPageViewProps {
   sessionToken: string | null
 }
 
-export const CliAuthPageView: React.FC<CliAuthPageViewProps> = ({ sessionToken }) => {
+export const CliAuthPageView: FC<CliAuthPageViewProps> = ({ sessionToken }) => {
   const styles = useStyles()
 
   if (!sessionToken) {
@@ -21,6 +21,7 @@ export const CliAuthPageView: React.FC<CliAuthPageViewProps> = ({ sessionToken }
   return (
     <SignInLayout>
       <Welcome message="Session token" />
+
       <p className={styles.text}>
         Copy the session token below and{" "}
         <strong className={styles.lineBreak}>paste it in your terminal</strong>.
@@ -29,7 +30,13 @@ export const CliAuthPageView: React.FC<CliAuthPageViewProps> = ({ sessionToken }
       <CodeExample code={sessionToken} />
 
       <div className={styles.links}>
-        <Button component={RouterLink} size="large" to="/workspaces" fullWidth variant="outlined">
+        <Button
+          component={RouterLink}
+          size="large"
+          to="/workspaces"
+          fullWidth
+          variant="outlined"
+        >
           Go to workspaces
         </Button>
       </div>

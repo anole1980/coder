@@ -1,7 +1,6 @@
 package coderd
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/coder/coder/coderd/httpmw"
@@ -12,21 +11,40 @@ import (
 )
 
 // assignableSiteRoles returns all site wide roles that can be assigned.
+//
+// @Summary Get site member roles
+// @ID get-site-member-roles
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Members
+// @Success 200 {array} codersdk.AssignableRoles
+// @Router /users/roles [get]
 func (api *API) assignableSiteRoles(rw http.ResponseWriter, r *http.Request) {
-	actorRoles := httpmw.AuthorizationUserRoles(r)
+	ctx := r.Context()
+	actorRoles := httpmw.UserAuthorization(r)
 	if !api.Authorize(r, rbac.ActionRead, rbac.ResourceRoleAssignment) {
 		httpapi.Forbidden(rw)
 		return
 	}
 
 	roles := rbac.SiteRoles()
-	httpapi.Write(rw, http.StatusOK, assignableRoles(actorRoles.Roles, roles))
+	httpapi.Write(ctx, rw, http.StatusOK, assignableRoles(actorRoles.Roles, roles))
 }
 
-// assignableSiteRoles returns all site wide roles that can be assigned.
+// assignableSiteRoles returns all org wide roles that can be assigned.
+//
+// @Summary Get member roles by organization
+// @ID get-member-roles-by-organization
+// @Security CoderSessionToken
+// @Produce json
+// @Tags Members
+// @Param organization path string true "Organization ID" format(uuid)
+// @Success 200 {array} codersdk.AssignableRoles
+// @Router /organizations/{organization}/members/roles [get]
 func (api *API) assignableOrgRoles(rw http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	organization := httpmw.OrganizationParam(r)
-	actorRoles := httpmw.AuthorizationUserRoles(r)
+	actorRoles := httpmw.UserAuthorization(r)
 
 	if !api.Authorize(r, rbac.ActionRead, rbac.ResourceOrgRoleAssignment.InOrg(organization.ID)) {
 		httpapi.Forbidden(rw)
@@ -34,51 +52,7 @@ func (api *API) assignableOrgRoles(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	roles := rbac.OrganizationRoles(organization.ID)
-	httpapi.Write(rw, http.StatusOK, assignableRoles(actorRoles.Roles, roles))
-}
-
-func (api *API) checkPermissions(rw http.ResponseWriter, r *http.Request) {
-	user := httpmw.UserParam(r)
-
-	if !api.Authorize(r, rbac.ActionRead, rbac.ResourceUser) {
-		httpapi.ResourceNotFound(rw)
-		return
-	}
-
-	// use the roles of the user specified, not the person making the request.
-	roles, err := api.Database.GetAuthorizationUserRoles(r.Context(), user.ID)
-	if err != nil {
-		httpapi.Forbidden(rw)
-		return
-	}
-
-	var params codersdk.UserAuthorizationRequest
-	if !httpapi.Read(rw, r, &params) {
-		return
-	}
-
-	response := make(codersdk.UserAuthorizationResponse)
-	for k, v := range params.Checks {
-		if v.Object.ResourceType == "" {
-			httpapi.Write(rw, http.StatusBadRequest, codersdk.Response{
-				Message: fmt.Sprintf("Object's \"resource_type\" field must be defined for key %q.", k),
-			})
-			return
-		}
-
-		if v.Object.OwnerID == "me" {
-			v.Object.OwnerID = roles.ID.String()
-		}
-		err := api.Authorizer.ByRoleName(r.Context(), roles.ID.String(), roles.Roles, rbac.Action(v.Action),
-			rbac.Object{
-				Owner: v.Object.OwnerID,
-				OrgID: v.Object.OrganizationID,
-				Type:  v.Object.ResourceType,
-			})
-		response[k] = err == nil
-	}
-
-	httpapi.Write(rw, http.StatusOK, response)
+	httpapi.Write(ctx, rw, http.StatusOK, assignableRoles(actorRoles.Roles, roles))
 }
 
 func convertRole(role rbac.Role) codersdk.Role {

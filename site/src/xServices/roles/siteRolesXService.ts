@@ -8,33 +8,31 @@ export const Language = {
 }
 
 type SiteRolesContext = {
+  hasPermission: boolean
   roles?: TypesGen.AssignableRoles[]
   getRolesError: Error | unknown
-}
-
-type SiteRolesEvent = {
-  type: "GET_ROLES"
 }
 
 export const siteRolesMachine = createMachine(
   {
     id: "siteRolesState",
-    initial: "idle",
+    predictableActionArguments: true,
+    tsTypes: {} as import("./siteRolesXService.typegen").Typegen0,
     schema: {
       context: {} as SiteRolesContext,
-      events: {} as SiteRolesEvent,
       services: {
         getRoles: {
           data: {} as TypesGen.AssignableRoles[],
         },
       },
     },
-    tsTypes: {} as import("./siteRolesXService.typegen").Typegen0,
+    initial: "initializing",
     states: {
-      idle: {
-        on: {
-          GET_ROLES: "gettingRoles",
-        },
+      initializing: {
+        always: [
+          { target: "gettingRoles", cond: "hasPermission" },
+          { target: "done" },
+        ],
       },
       gettingRoles: {
         entry: "clearGetRolesError",
@@ -42,14 +40,17 @@ export const siteRolesMachine = createMachine(
           id: "getRoles",
           src: "getRoles",
           onDone: {
-            target: "idle",
+            target: "done",
             actions: ["assignRoles"],
           },
           onError: {
-            target: "idle",
+            target: "done",
             actions: ["assignGetRolesError", "displayGetRolesError"],
           },
         },
+      },
+      done: {
+        type: "final",
       },
     },
   },
@@ -70,6 +71,9 @@ export const siteRolesMachine = createMachine(
     },
     services: {
       getRoles: () => API.getSiteRoles(),
+    },
+    guards: {
+      hasPermission: ({ hasPermission }) => hasPermission,
     },
   },
 )

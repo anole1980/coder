@@ -44,12 +44,10 @@ coder:
           name: coder-db-url
           key: url
 
-    # This env variable controls whether or not to auto-import the "kubernetes"
-    # template on first startup. This will not work unless
-    # coder.serviceAccount.workspacePerms is true.
-    - name: CODER_TEMPLATE_AUTOIMPORT
-      value: "kubernetes"
-
+    # This env enables the Prometheus metrics endpoint.
+    - name: CODER_PROMETHEUS_ADDRESS
+      value: "0.0.0.0:2112"
   tls:
-    secretName: my-tls-secret-name
+    secretNames:
+      - my-tls-secret-name
 ```

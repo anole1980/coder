@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -12,16 +13,38 @@ import (
 
 // TemplateVersion represents a single version of a template.
 type TemplateVersion struct {
-	ID             uuid.UUID      `json:"id"`
-	TemplateID     *uuid.UUID     `json:"template_id,omitempty"`
-	OrganizationID uuid.UUID      `json:"organization_id,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID             uuid.UUID      `json:"id" format:"uuid"`
+	TemplateID     *uuid.UUID     `json:"template_id,omitempty" format:"uuid"`
+	OrganizationID uuid.UUID      `json:"organization_id,omitempty" format:"uuid"`
+	CreatedAt      time.Time      `json:"created_at" format:"date-time"`
+	UpdatedAt      time.Time      `json:"updated_at" format:"date-time"`
 	Name           string         `json:"name"`
 	Job            ProvisionerJob `json:"job"`
 	Readme         string         `json:"readme"`
-	CreatedByID    uuid.UUID      `json:"created_by_id"`
-	CreatedByName  string         `json:"created_by_name"`
+	CreatedBy      User           `json:"created_by"`
+}
+
+// TemplateVersionParameter represents a parameter for a template version.
+type TemplateVersionParameter struct {
+	Name            string                           `json:"name"`
+	Description     string                           `json:"description"`
+	Type            string                           `json:"type"`
+	Mutable         bool                             `json:"mutable"`
+	DefaultValue    string                           `json:"default_value"`
+	Icon            string                           `json:"icon"`
+	Options         []TemplateVersionParameterOption `json:"options"`
+	ValidationError string                           `json:"validation_error"`
+	ValidationRegex string                           `json:"validation_regex"`
+	ValidationMin   int32                            `json:"validation_min"`
+	ValidationMax   int32                            `json:"validation_max"`
+}
+
+// TemplateVersionParameterOption represents a selectable option for a template parameter.
+type TemplateVersionParameterOption struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Value       string `json:"value"`
+	Icon        string `json:"icon"`
 }
 
 // TemplateVersion returns a template version by ID.
@@ -49,6 +72,20 @@ func (c *Client) CancelTemplateVersion(ctx context.Context, version uuid.UUID) e
 		return readBodyAsError(res)
 	}
 	return nil
+}
+
+// TemplateVersionParameters returns parameters a template version exposes.
+func (c *Client) TemplateVersionRichParameters(ctx context.Context, version uuid.UUID) ([]TemplateVersionParameter, error) {
+	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/templateversions/%s/rich-parameters", version), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, readBodyAsError(res)
+	}
+	var params []TemplateVersionParameter
+	return params, json.NewDecoder(res.Body).Decode(&params)
 }
 
 // TemplateVersionSchema returns schemas for a template version by ID.
@@ -93,21 +130,22 @@ func (c *Client) TemplateVersionResources(ctx context.Context, version uuid.UUID
 	return resources, json.NewDecoder(res.Body).Decode(&resources)
 }
 
-// TemplateVersionLogsBefore returns logs that occurred before a specific time.
-func (c *Client) TemplateVersionLogsBefore(ctx context.Context, version uuid.UUID, before time.Time) ([]ProvisionerJobLog, error) {
+// TemplateVersionLogsBefore returns logs that occurred before a specific log ID.
+func (c *Client) TemplateVersionLogsBefore(ctx context.Context, version uuid.UUID, before int64) ([]ProvisionerJobLog, error) {
 	return c.provisionerJobLogsBefore(ctx, fmt.Sprintf("/api/v2/templateversions/%s/logs", version), before)
 }
 
-// TemplateVersionLogsAfter streams logs for a template version that occurred after a specific time.
-func (c *Client) TemplateVersionLogsAfter(ctx context.Context, version uuid.UUID, after time.Time) (<-chan ProvisionerJobLog, error) {
+// TemplateVersionLogsAfter streams logs for a template version that occurred after a specific log ID.
+func (c *Client) TemplateVersionLogsAfter(ctx context.Context, version uuid.UUID, after int64) (<-chan ProvisionerJobLog, io.Closer, error) {
 	return c.provisionerJobLogsAfter(ctx, fmt.Sprintf("/api/v2/templateversions/%s/logs", version), after)
 }
 
 // CreateTemplateVersionDryRunRequest defines the request parameters for
 // CreateTemplateVersionDryRun.
 type CreateTemplateVersionDryRunRequest struct {
-	WorkspaceName   string
-	ParameterValues []CreateParameterRequest
+	WorkspaceName       string                    `json:"workspace_name"`
+	ParameterValues     []CreateParameterRequest  `json:"parameter_values"`
+	RichParameterValues []WorkspaceBuildParameter `json:"rich_parameter_values"`
 }
 
 // CreateTemplateVersionDryRun begins a dry-run provisioner job against the
@@ -159,14 +197,14 @@ func (c *Client) TemplateVersionDryRunResources(ctx context.Context, version, jo
 }
 
 // TemplateVersionDryRunLogsBefore returns logs for a template version dry-run
-// that occurred before a specific time.
-func (c *Client) TemplateVersionDryRunLogsBefore(ctx context.Context, version, job uuid.UUID, before time.Time) ([]ProvisionerJobLog, error) {
+// that occurred before a specific log ID.
+func (c *Client) TemplateVersionDryRunLogsBefore(ctx context.Context, version, job uuid.UUID, before int64) ([]ProvisionerJobLog, error) {
 	return c.provisionerJobLogsBefore(ctx, fmt.Sprintf("/api/v2/templateversions/%s/dry-run/%s/logs", version, job), before)
 }
 
 // TemplateVersionDryRunLogsAfter streams logs for a template version dry-run
-// that occurred after a specific time.
-func (c *Client) TemplateVersionDryRunLogsAfter(ctx context.Context, version, job uuid.UUID, after time.Time) (<-chan ProvisionerJobLog, error) {
+// that occurred after a specific log ID.
+func (c *Client) TemplateVersionDryRunLogsAfter(ctx context.Context, version, job uuid.UUID, after int64) (<-chan ProvisionerJobLog, io.Closer, error) {
 	return c.provisionerJobLogsAfter(ctx, fmt.Sprintf("/api/v2/templateversions/%s/dry-run/%s/logs", version, job), after)
 }
 
@@ -181,4 +219,17 @@ func (c *Client) CancelTemplateVersionDryRun(ctx context.Context, version, job u
 		return readBodyAsError(res)
 	}
 	return nil
+}
+
+func (c *Client) PreviousTemplateVersion(ctx context.Context, organization uuid.UUID, versionName string) (TemplateVersion, error) {
+	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/organizations/%s/templateversions/%s/previous", organization, versionName), nil)
+	if err != nil {
+		return TemplateVersion{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return TemplateVersion{}, readBodyAsError(res)
+	}
+	var version TemplateVersion
+	return version, json.NewDecoder(res.Body).Decode(&version)
 }

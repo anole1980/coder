@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bytes"
 	"os"
 	"testing"
 
@@ -43,8 +44,8 @@ func TestTemplateCreate(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		coderdtest.CreateFirstUser(t, client)
 		source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
-			Parse:     echo.ParseComplete,
-			Provision: provisionCompleteWithAgent,
+			Parse:          echo.ParseComplete,
+			ProvisionApply: provisionCompleteWithAgent,
 		})
 		args := []string{
 			"templates",
@@ -52,8 +53,7 @@ func TestTemplateCreate(t *testing.T) {
 			"my-template",
 			"--directory", source,
 			"--test.provisioner", string(database.ProvisionerTypeEcho),
-			"--max-ttl", "24h",
-			"--min-autostart-interval", "2h",
+			"--default-ttl", "24h",
 		}
 		cmd, root := clitest.New(t, args...)
 		clitest.SetupConfig(t, client, root)
@@ -70,7 +70,7 @@ func TestTemplateCreate(t *testing.T) {
 			match string
 			write string
 		}{
-			{match: "Create and upload", write: "yes"},
+			{match: "Upload", write: "yes"},
 			{match: "compute.main"},
 			{match: "smith (linux, i386)"},
 			{match: "Confirm create?", write: "yes"},
@@ -85,14 +85,46 @@ func TestTemplateCreate(t *testing.T) {
 		require.NoError(t, <-execDone)
 	})
 
+	t.Run("CreateStdin", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		coderdtest.CreateFirstUser(t, client)
+		source, err := echo.Tar(&echo.Responses{
+			Parse:          echo.ParseComplete,
+			ProvisionApply: provisionCompleteWithAgent,
+		})
+		require.NoError(t, err)
+
+		args := []string{
+			"templates",
+			"create",
+			"my-template",
+			"--directory", "-",
+			"--test.provisioner", string(database.ProvisionerTypeEcho),
+			"--default-ttl", "24h",
+		}
+		cmd, root := clitest.New(t, args...)
+		clitest.SetupConfig(t, client, root)
+		pty := ptytest.New(t)
+		cmd.SetIn(bytes.NewReader(source))
+		cmd.SetOut(pty.Output())
+
+		execDone := make(chan error)
+		go func() {
+			execDone <- cmd.Execute()
+		}()
+
+		require.NoError(t, <-execDone)
+	})
+
 	t.Run("WithParameter", func(t *testing.T) {
 		t.Parallel()
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		coderdtest.CreateFirstUser(t, client)
 		source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
-			Parse:           createTestParseResponse(),
-			Provision:       echo.ProvisionComplete,
-			ProvisionDryRun: echo.ProvisionComplete,
+			Parse:          createTestParseResponse(),
+			ProvisionApply: echo.ProvisionComplete,
+			ProvisionPlan:  echo.ProvisionComplete,
 		})
 		cmd, root := clitest.New(t, "templates", "create", "my-template", "--directory", source, "--test.provisioner", string(database.ProvisionerTypeEcho))
 		clitest.SetupConfig(t, client, root)
@@ -109,7 +141,7 @@ func TestTemplateCreate(t *testing.T) {
 			match string
 			write string
 		}{
-			{match: "Create and upload", write: "yes"},
+			{match: "Upload", write: "yes"},
 			{match: "Enter a value:", write: "bananas"},
 			{match: "Confirm create?", write: "yes"},
 		}
@@ -126,9 +158,9 @@ func TestTemplateCreate(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		coderdtest.CreateFirstUser(t, client)
 		source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
-			Parse:           createTestParseResponse(),
-			Provision:       echo.ProvisionComplete,
-			ProvisionDryRun: echo.ProvisionComplete,
+			Parse:          createTestParseResponse(),
+			ProvisionApply: echo.ProvisionComplete,
+			ProvisionPlan:  echo.ProvisionComplete,
 		})
 		tempDir := t.TempDir()
 		removeTmpDirUntilSuccessAfterTest(t, tempDir)
@@ -149,7 +181,7 @@ func TestTemplateCreate(t *testing.T) {
 			match string
 			write string
 		}{
-			{match: "Create and upload", write: "yes"},
+			{match: "Upload", write: "yes"},
 			{match: "Confirm create?", write: "yes"},
 		}
 		for _, m := range matches {
@@ -165,9 +197,9 @@ func TestTemplateCreate(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		coderdtest.CreateFirstUser(t, client)
 		source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
-			Parse:           createTestParseResponse(),
-			Provision:       echo.ProvisionComplete,
-			ProvisionDryRun: echo.ProvisionComplete,
+			Parse:          createTestParseResponse(),
+			ProvisionApply: echo.ProvisionComplete,
+			ProvisionPlan:  echo.ProvisionComplete,
 		})
 		tempDir := t.TempDir()
 		removeTmpDirUntilSuccessAfterTest(t, tempDir)
@@ -188,14 +220,25 @@ func TestTemplateCreate(t *testing.T) {
 			match string
 			write string
 		}{
-			{match: "Create and upload", write: "yes"},
+			{
+				match: "Upload",
+				write: "yes",
+			},
+			{
+				match: "Enter a value:",
+				write: "bingo",
+			},
+			{
+				match: "Confirm create?",
+				write: "yes",
+			},
 		}
 		for _, m := range matches {
 			pty.ExpectMatch(m.match)
 			pty.WriteLine(m.write)
 		}
 
-		require.EqualError(t, <-execDone, "Parameter value absent in parameter file for \"region\"!")
+		require.NoError(t, <-execDone)
 	})
 
 	t.Run("Recreate template with same name (create, delete, create)", func(t *testing.T) {
@@ -205,8 +248,8 @@ func TestTemplateCreate(t *testing.T) {
 
 		create := func() error {
 			source := clitest.CreateTemplateVersionSource(t, &echo.Responses{
-				Parse:     echo.ParseComplete,
-				Provision: provisionCompleteWithAgent,
+				Parse:          echo.ParseComplete,
+				ProvisionApply: provisionCompleteWithAgent,
 			})
 			args := []string{
 				"templates",

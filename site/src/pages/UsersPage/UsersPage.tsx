@@ -1,19 +1,23 @@
-import { useActor } from "@xstate/react"
-import { FC, ReactNode, useContext, useEffect } from "react"
+import { useMachine } from "@xstate/react"
+import { User } from "api/typesGenerated"
+import { DeleteDialog } from "components/Dialogs/DeleteDialog/DeleteDialog"
+import {
+  getPaginationContext,
+  nonInitialPage,
+} from "components/PaginationWidget/utils"
+import { usePermissions } from "hooks/usePermissions"
+import { FC, ReactNode } from "react"
 import { Helmet } from "react-helmet-async"
 import { useNavigate } from "react-router"
 import { useSearchParams } from "react-router-dom"
+import { siteRolesMachine } from "xServices/roles/siteRolesXService"
+import { usersMachine } from "xServices/users/usersXService"
 import { ConfirmDialog } from "../../components/Dialogs/ConfirmDialog/ConfirmDialog"
 import { ResetPasswordDialog } from "../../components/Dialogs/ResetPasswordDialog/ResetPasswordDialog"
-import { userFilterQuery } from "../../util/filters"
 import { pageTitle } from "../../util/page"
-import { XServiceContext } from "../../xServices/StateContext"
 import { UsersPageView } from "./UsersPageView"
 
 export const Language = {
-  deleteDialogTitle: "Delete user",
-  deleteDialogAction: "Delete",
-  deleteDialogMessagePrefix: "Do you want to delete the user",
   suspendDialogTitle: "Suspend user",
   suspendDialogAction: "Suspend",
   suspendDialogMessagePrefix: "Do you want to suspend the user",
@@ -22,61 +26,49 @@ export const Language = {
   activateDialogMessagePrefix: "Do you want to activate the user",
 }
 
+const getSelectedUser = (id: string, users?: User[]) =>
+  users?.find((u) => u.id === id)
+
 export const UsersPage: FC<{ children?: ReactNode }> = () => {
-  const xServices = useContext(XServiceContext)
-  const [usersState, usersSend] = useActor(xServices.usersXService)
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const filter = searchParams.get("filter") ?? ""
+  const [usersState, usersSend] = useMachine(usersMachine, {
+    context: {
+      filter,
+      paginationContext: getPaginationContext(searchParams),
+    },
+    actions: {
+      updateURL: (context, event) =>
+        setSearchParams({ page: event.page, filter: context.filter }),
+    },
+  })
   const {
     users,
     getUsersError,
-    userIdToDelete,
-    userIdToSuspend,
-    userIdToActivate,
+    usernameToDelete,
+    usernameToSuspend,
+    usernameToActivate,
     userIdToResetPassword,
     newUserPassword,
+    paginationRef,
+    count,
   } = usersState.context
-  const navigate = useNavigate()
-  const [searchParams, setSearchParams] = useSearchParams()
-  const userToBeSuspended = users?.find((u) => u.id === userIdToSuspend)
-  const userToBeDeleted = users?.find((u) => u.id === userIdToDelete)
-  const userToBeActivated = users?.find((u) => u.id === userIdToActivate)
-  const userToResetPassword = users?.find((u) => u.id === userIdToResetPassword)
 
-  const [authState, _] = useActor(xServices.authXService)
-  const { permissions } = authState.context
-  const canEditUsers = permissions && permissions.updateUsers
-  const canCreateUser = permissions && permissions.createUser
-
-  const [rolesState, rolesSend] = useActor(xServices.siteRolesXService)
+  const { updateUsers: canEditUsers } = usePermissions()
+  const [rolesState] = useMachine(siteRolesMachine, {
+    context: {
+      hasPermission: canEditUsers,
+    },
+  })
   const { roles } = rolesState.context
 
   // Is loading if
-  // - permissions are loading or
   // - users are loading or
   // - the user can edit the users but the roles are loading
   const isLoading =
-    authState.matches("gettingPermissions") ||
     usersState.matches("gettingUsers") ||
     (canEditUsers && rolesState.matches("gettingRoles"))
-
-  // Fetch users on component mount
-  useEffect(() => {
-    const filter = searchParams.get("filter")
-    const query = filter ?? userFilterQuery.active
-    usersSend({
-      type: "GET_USERS",
-      query,
-    })
-  }, [searchParams, usersSend])
-
-  // Fetch roles on component mount
-  useEffect(() => {
-    // Only fetch the roles if the user has permission for it
-    if (canEditUsers) {
-      rolesSend({
-        type: "GET_ROLES",
-      })
-    }
-  }, [canEditUsers, rolesSend])
 
   return (
     <>
@@ -86,20 +78,33 @@ export const UsersPage: FC<{ children?: ReactNode }> = () => {
       <UsersPageView
         roles={roles}
         users={users}
-        openUserCreationDialog={() => {
-          navigate("/users/create")
-        }}
+        count={count}
         onListWorkspaces={(user) => {
-          navigate("/workspaces?filter=" + encodeURIComponent(`owner:${user.username}`))
+          navigate(
+            "/workspaces?filter=" +
+              encodeURIComponent(`owner:${user.username}`),
+          )
         }}
         onDeleteUser={(user) => {
-          usersSend({ type: "DELETE_USER", userId: user.id })
+          usersSend({
+            type: "DELETE_USER",
+            userId: user.id,
+            username: user.username,
+          })
         }}
         onSuspendUser={(user) => {
-          usersSend({ type: "SUSPEND_USER", userId: user.id })
+          usersSend({
+            type: "SUSPEND_USER",
+            userId: user.id,
+            username: user.username,
+          })
         }}
         onActivateUser={(user) => {
-          usersSend({ type: "ACTIVATE_USER", userId: user.id })
+          usersSend({
+            type: "ACTIVATE_USER",
+            userId: user.id,
+            username: user.username,
+          })
         }}
         onResetUserPassword={(user) => {
           usersSend({ type: "RESET_USER_PASSWORD", userId: user.id })
@@ -115,38 +120,37 @@ export const UsersPage: FC<{ children?: ReactNode }> = () => {
         isUpdatingUserRoles={usersState.matches("updatingUserRoles")}
         isLoading={isLoading}
         canEditUsers={canEditUsers}
-        canCreateUser={canCreateUser}
         filter={usersState.context.filter}
         onFilter={(query) => {
-          searchParams.set("filter", query)
-          setSearchParams(searchParams)
+          usersSend({ type: "UPDATE_FILTER", query })
         }}
+        paginationRef={paginationRef}
+        isNonInitialPage={nonInitialPage(searchParams)}
       />
 
-      <ConfirmDialog
-        type="delete"
-        hideCancel={false}
-        open={usersState.matches("confirmUserDeletion")}
+      <DeleteDialog
+        isOpen={
+          usersState.matches("confirmUserDeletion") ||
+          usersState.matches("deletingUser")
+        }
         confirmLoading={usersState.matches("deletingUser")}
-        title={Language.deleteDialogTitle}
-        confirmText={Language.deleteDialogAction}
+        name={usernameToDelete ?? ""}
+        entity="user"
         onConfirm={() => {
           usersSend("CONFIRM_USER_DELETE")
         }}
-        onClose={() => {
+        onCancel={() => {
           usersSend("CANCEL_USER_DELETE")
         }}
-        description={
-          <>
-            {Language.deleteDialogMessagePrefix} <strong>{userToBeDeleted?.username}</strong>?
-          </>
-        }
       />
 
       <ConfirmDialog
         type="delete"
         hideCancel={false}
-        open={usersState.matches("confirmUserSuspension")}
+        open={
+          usersState.matches("confirmUserSuspension") ||
+          usersState.matches("suspendingUser")
+        }
         confirmLoading={usersState.matches("suspendingUser")}
         title={Language.suspendDialogTitle}
         confirmText={Language.suspendDialogAction}
@@ -158,7 +162,9 @@ export const UsersPage: FC<{ children?: ReactNode }> = () => {
         }}
         description={
           <>
-            {Language.suspendDialogMessagePrefix} <strong>{userToBeSuspended?.username}</strong>?
+            {Language.suspendDialogMessagePrefix}
+            {usernameToSuspend && " "}
+            <strong>{usernameToSuspend ?? ""}</strong>?
           </>
         }
       />
@@ -166,7 +172,10 @@ export const UsersPage: FC<{ children?: ReactNode }> = () => {
       <ConfirmDialog
         type="success"
         hideCancel={false}
-        open={usersState.matches("confirmUserActivation")}
+        open={
+          usersState.matches("confirmUserActivation") ||
+          usersState.matches("activatingUser")
+        }
         confirmLoading={usersState.matches("activatingUser")}
         title={Language.activateDialogTitle}
         confirmText={Language.activateDialogAction}
@@ -178,23 +187,32 @@ export const UsersPage: FC<{ children?: ReactNode }> = () => {
         }}
         description={
           <>
-            {Language.activateDialogMessagePrefix} <strong>{userToBeActivated?.username}</strong>?
+            {Language.activateDialogMessagePrefix}
+            {usernameToActivate && " "}
+            <strong>{usernameToActivate ?? ""}</strong>?
           </>
         }
       />
 
-      <ResetPasswordDialog
-        loading={usersState.matches("resettingUserPassword")}
-        user={userToResetPassword}
-        newPassword={newUserPassword}
-        open={usersState.matches("confirmUserPasswordReset")}
-        onClose={() => {
-          usersSend("CANCEL_USER_PASSWORD_RESET")
-        }}
-        onConfirm={() => {
-          usersSend("CONFIRM_USER_PASSWORD_RESET")
-        }}
-      />
+      {userIdToResetPassword && (
+        <ResetPasswordDialog
+          open={
+            usersState.matches("confirmUserPasswordReset") ||
+            usersState.matches("resettingUserPassword")
+          }
+          loading={usersState.matches("resettingUserPassword")}
+          user={getSelectedUser(userIdToResetPassword, users)}
+          newPassword={newUserPassword}
+          onClose={() => {
+            usersSend("CANCEL_USER_PASSWORD_RESET")
+          }}
+          onConfirm={() => {
+            usersSend("CONFIRM_USER_PASSWORD_RESET")
+          }}
+        />
+      )}
     </>
   )
 }
+
+export default UsersPage

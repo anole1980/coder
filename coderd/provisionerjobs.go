@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,17 +25,20 @@ import (
 // Returns provisioner logs based on query parameters.
 // The intended usage for a client to stream all logs (with JS API):
 // const timestamp = new Date().getTime();
-// 1. GET /logs?before=<timestamp>
-// 2. GET /logs?after=<timestamp>&follow
+// 1. GET /logs?before=<id>
+// 2. GET /logs?after=<id>&follow
 // The combination of these responses should provide all current logs
 // to the consumer, and future logs are streamed in the follow request.
 func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job database.ProvisionerJob) {
-	logger := api.Logger.With(slog.F("job_id", job.ID))
-	follow := r.URL.Query().Has("follow")
-	afterRaw := r.URL.Query().Get("after")
-	beforeRaw := r.URL.Query().Get("before")
+	var (
+		ctx       = r.Context()
+		logger    = api.Logger.With(slog.F("job_id", job.ID))
+		follow    = r.URL.Query().Has("follow")
+		afterRaw  = r.URL.Query().Get("after")
+		beforeRaw = r.URL.Query().Get("before")
+	)
 	if beforeRaw != "" && follow {
-		httpapi.Write(rw, http.StatusBadRequest, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 			Message: "Query param \"before\" cannot be used with \"follow\".",
 		})
 		return
@@ -47,7 +51,7 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 	if follow {
 		bl, closeFollow, err := api.followLogs(job.ID)
 		if err != nil {
-			httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+			httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 				Message: "Internal error watching provisioner logs.",
 				Detail:  err.Error(),
 			})
@@ -61,9 +65,9 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 		// has, but we need to query it *after* we start following the pubsub to avoid a race condition where the job
 		// completes between the prior query and the start of following the pubsub.  A more substantial refactor could
 		// avoid this, but not worth it for one fewer query at this point.
-		job, err = api.Database.GetProvisionerJobByID(r.Context(), job.ID)
+		job, err = api.Database.GetProvisionerJobByID(ctx, job.ID)
 		if err != nil {
-			httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+			httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 				Message: "Internal error querying job.",
 				Detail:  err.Error(),
 			})
@@ -71,12 +75,13 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 		}
 	}
 
-	var after time.Time
+	var after int64
 	// Only fetch logs created after the time provided.
 	if afterRaw != "" {
-		afterMS, err := strconv.ParseInt(afterRaw, 10, 64)
+		var err error
+		after, err = strconv.ParseInt(afterRaw, 10, 64)
 		if err != nil {
-			httpapi.Write(rw, http.StatusBadRequest, codersdk.Response{
+			httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 				Message: "Query param \"after\" must be an integer.",
 				Validations: []codersdk.ValidationError{
 					{Field: "after", Detail: "Must be an integer"},
@@ -84,18 +89,14 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 			})
 			return
 		}
-		after = time.UnixMilli(afterMS)
-	} else {
-		if follow {
-			after = database.Now()
-		}
 	}
-	var before time.Time
+	var before int64
 	// Only fetch logs created before the time provided.
 	if beforeRaw != "" {
-		beforeMS, err := strconv.ParseInt(beforeRaw, 10, 64)
+		var err error
+		before, err = strconv.ParseInt(beforeRaw, 10, 64)
 		if err != nil {
-			httpapi.Write(rw, http.StatusBadRequest, codersdk.Response{
+			httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 				Message: "Query param \"before\" must be an integer.",
 				Validations: []codersdk.ValidationError{
 					{Field: "before", Detail: "Must be an integer"},
@@ -103,15 +104,9 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 			})
 			return
 		}
-		before = time.UnixMilli(beforeMS)
-	} else {
-		// If we're following, we don't want logs before a timestamp!
-		if !follow {
-			before = database.Now()
-		}
 	}
 
-	logs, err := api.Database.GetProvisionerLogsByIDBetween(r.Context(), database.GetProvisionerLogsByIDBetweenParams{
+	logs, err := api.Database.GetProvisionerLogsByIDBetween(ctx, database.GetProvisionerLogsByIDBetweenParams{
 		JobID:         job.ID,
 		CreatedAfter:  after,
 		CreatedBefore: before,
@@ -120,7 +115,7 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 		err = nil
 	}
 	if err != nil {
-		httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching provisioner logs.",
 			Detail:  err.Error(),
 		})
@@ -131,28 +126,29 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 	}
 
 	if !follow {
-		logger.Debug(r.Context(), "Finished non-follow job logs")
-		httpapi.Write(rw, http.StatusOK, convertProvisionerJobLogs(logs))
+		logger.Debug(ctx, "Finished non-follow job logs")
+		httpapi.Write(ctx, rw, http.StatusOK, convertProvisionerJobLogs(logs))
 		return
 	}
 
-	api.websocketWaitMutex.Lock()
-	api.websocketWaitGroup.Add(1)
-	api.websocketWaitMutex.Unlock()
-	defer api.websocketWaitGroup.Done()
+	api.WebsocketWaitMutex.Lock()
+	api.WebsocketWaitGroup.Add(1)
+	api.WebsocketWaitMutex.Unlock()
+	defer api.WebsocketWaitGroup.Done()
 	conn, err := websocket.Accept(rw, r, nil)
 	if err != nil {
-		httpapi.Write(rw, http.StatusBadRequest, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 			Message: "Failed to accept websocket.",
 			Detail:  err.Error(),
 		})
 		return
 	}
+	go httpapi.Heartbeat(ctx, conn)
 
-	ctx, wsNetConn := websocketNetConn(r.Context(), conn, websocket.MessageText)
+	ctx, wsNetConn := websocketNetConn(ctx, conn, websocket.MessageText)
 	defer wsNetConn.Close() // Also closes conn.
 
-	logIdsDone := make(map[uuid.UUID]bool)
+	logIdsDone := make(map[int64]bool)
 
 	// The Go stdlib JSON encoder appends a newline character after message write.
 	encoder := json.NewEncoder(wsNetConn)
@@ -180,10 +176,10 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 				return
 			}
 			if logIdsDone[log.ID] {
-				logger.Debug(r.Context(), "subscribe duplicated log",
+				logger.Debug(ctx, "subscribe duplicated log",
 					slog.F("stage", log.Stage))
 			} else {
-				logger.Debug(r.Context(), "subscribe encoding log",
+				logger.Debug(ctx, "subscribe encoding log",
 					slog.F("stage", log.Stage))
 				err = encoder.Encode(convertProvisionerJobLog(log))
 				if err != nil {
@@ -195,18 +191,19 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 }
 
 func (api *API) provisionerJobResources(rw http.ResponseWriter, r *http.Request, job database.ProvisionerJob) {
+	ctx := r.Context()
 	if !job.CompletedAt.Valid {
-		httpapi.Write(rw, http.StatusPreconditionFailed, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
 			Message: "Job hasn't completed!",
 		})
 		return
 	}
-	resources, err := api.Database.GetWorkspaceResourcesByJobID(r.Context(), job.ID)
+	resources, err := api.Database.GetWorkspaceResourcesByJobID(ctx, job.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
 	if err != nil {
-		httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching job resources.",
 			Detail:  err.Error(),
 		})
@@ -216,12 +213,12 @@ func (api *API) provisionerJobResources(rw http.ResponseWriter, r *http.Request,
 	for _, resource := range resources {
 		resourceIDs = append(resourceIDs, resource.ID)
 	}
-	resourceAgents, err := api.Database.GetWorkspaceAgentsByResourceIDs(r.Context(), resourceIDs)
+	resourceAgents, err := api.Database.GetWorkspaceAgentsByResourceIDs(ctx, resourceIDs)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
 	if err != nil {
-		httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching workspace agent.",
 			Detail:  err.Error(),
 		})
@@ -231,20 +228,20 @@ func (api *API) provisionerJobResources(rw http.ResponseWriter, r *http.Request,
 	for _, agent := range resourceAgents {
 		resourceAgentIDs = append(resourceAgentIDs, agent.ID)
 	}
-	apps, err := api.Database.GetWorkspaceAppsByAgentIDs(r.Context(), resourceAgentIDs)
+	apps, err := api.Database.GetWorkspaceAppsByAgentIDs(ctx, resourceAgentIDs)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = nil
 	}
 	if err != nil {
-		httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching workspace applications.",
 			Detail:  err.Error(),
 		})
 		return
 	}
-	resourceMetadata, err := api.Database.GetWorkspaceResourceMetadataByResourceIDs(r.Context(), resourceIDs)
+	resourceMetadata, err := api.Database.GetWorkspaceResourceMetadataByResourceIDs(ctx, resourceIDs)
 	if err != nil {
-		httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching workspace metadata.",
 			Detail:  err.Error(),
 		})
@@ -265,9 +262,9 @@ func (api *API) provisionerJobResources(rw http.ResponseWriter, r *http.Request,
 				}
 			}
 
-			apiAgent, err := convertWorkspaceAgent(api.DERPMap, api.TailnetCoordinator, agent, convertApps(dbApps), api.AgentInactiveDisconnectTimeout)
+			apiAgent, err := convertWorkspaceAgent(api.DERPMap, *api.TailnetCoordinator.Load(), agent, convertApps(dbApps), api.AgentInactiveDisconnectTimeout, api.DeploymentConfig.AgentFallbackTroubleshootingURL.Value)
 			if err != nil {
-				httpapi.Write(rw, http.StatusInternalServerError, codersdk.Response{
+				httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 					Message: "Internal error reading job agent.",
 					Detail:  err.Error(),
 				})
@@ -287,7 +284,7 @@ func (api *API) provisionerJobResources(rw http.ResponseWriter, r *http.Request,
 		return apiResources[i].Name < apiResources[j].Name
 	})
 
-	httpapi.Write(rw, http.StatusOK, apiResources)
+	httpapi.Write(ctx, rw, http.StatusOK, apiResources)
 }
 
 func convertProvisionerJobLogs(provisionerJobLogs []database.ProvisionerJobLog) []codersdk.ProvisionerJobLog {
@@ -311,10 +308,11 @@ func convertProvisionerJobLog(provisionerJobLog database.ProvisionerJobLog) code
 
 func convertProvisionerJob(provisionerJob database.ProvisionerJob) codersdk.ProvisionerJob {
 	job := codersdk.ProvisionerJob{
-		ID:            provisionerJob.ID,
-		CreatedAt:     provisionerJob.CreatedAt,
-		Error:         provisionerJob.Error.String,
-		StorageSource: provisionerJob.StorageSource,
+		ID:        provisionerJob.ID,
+		CreatedAt: provisionerJob.CreatedAt,
+		Error:     provisionerJob.Error.String,
+		FileID:    provisionerJob.FileID,
+		Tags:      provisionerJob.Tags,
 	}
 	// Applying values optional to the struct.
 	if provisionerJob.StartedAt.Valid {
@@ -322,6 +320,9 @@ func convertProvisionerJob(provisionerJob database.ProvisionerJob) codersdk.Prov
 	}
 	if provisionerJob.CompletedAt.Valid {
 		job.CompletedAt = &provisionerJob.CompletedAt.Time
+	}
+	if provisionerJob.CanceledAt.Valid {
+		job.CanceledAt = &provisionerJob.CanceledAt.Time
 	}
 	if provisionerJob.WorkerID.Valid {
 		job.WorkerID = &provisionerJob.WorkerID.UUID
@@ -362,15 +363,27 @@ func provisionerJobLogsChannel(jobID uuid.UUID) string {
 
 // provisionerJobLogsMessage is the message type published on the provisionerJobLogsChannel() channel
 type provisionerJobLogsMessage struct {
-	EndOfLogs bool                         `json:"end_of_logs,omitempty"`
-	Logs      []database.ProvisionerJobLog `json:"logs,omitempty"`
+	CreatedAfter int64 `json:"created_after"`
+	EndOfLogs    bool  `json:"end_of_logs,omitempty"`
 }
 
 func (api *API) followLogs(jobID uuid.UUID) (<-chan database.ProvisionerJobLog, func(), error) {
 	logger := api.Logger.With(slog.F("job_id", jobID))
-	bufferedLogs := make(chan database.ProvisionerJobLog, 128)
-	closeSubscribe, err := api.Pubsub.Subscribe(provisionerJobLogsChannel(jobID),
+
+	var (
+		closed       = make(chan struct{})
+		bufferedLogs = make(chan database.ProvisionerJobLog, 128)
+		logMut       = &sync.Mutex{}
+	)
+	closeSubscribe, err := api.Pubsub.Subscribe(
+		provisionerJobLogsChannel(jobID),
 		func(ctx context.Context, message []byte) {
+			select {
+			case <-closed:
+				return
+			default:
+			}
+
 			jlMsg := provisionerJobLogsMessage{}
 			err := json.Unmarshal(message, &jlMsg)
 			if err != nil {
@@ -378,22 +391,59 @@ func (api *API) followLogs(jobID uuid.UUID) (<-chan database.ProvisionerJobLog, 
 				return
 			}
 
-			for _, log := range jlMsg.Logs {
-				select {
-				case bufferedLogs <- log:
-					logger.Debug(ctx, "subscribe buffered log", slog.F("stage", log.Stage))
-				default:
-					// If this overflows users could miss logs streaming. This can happen
-					// we get a lot of logs and consumer isn't keeping up.  We don't want to block the pubsub,
-					// so just drop them.
-					logger.Warn(ctx, "provisioner job log overflowing channel")
+			if jlMsg.CreatedAfter != 0 {
+				logs, err := api.Database.GetProvisionerLogsByIDBetween(ctx, database.GetProvisionerLogsByIDBetweenParams{
+					JobID:        jobID,
+					CreatedAfter: jlMsg.CreatedAfter,
+				})
+				if err != nil {
+					logger.Warn(ctx, "get provisioner logs", slog.Error(err))
+					return
+				}
+
+				for _, log := range logs {
+					// Sadly we have to use a mutex here because events may be
+					// handled out of order due to golang goroutine scheduling
+					// semantics (even though Postgres guarantees ordering of
+					// notifications).
+					logMut.Lock()
+					select {
+					case <-closed:
+						logMut.Unlock()
+						return
+					default:
+					}
+
+					select {
+					case bufferedLogs <- log:
+						logger.Debug(ctx, "subscribe buffered log", slog.F("stage", log.Stage))
+					default:
+						// If this overflows users could miss logs streaming. This can happen
+						// we get a lot of logs and consumer isn't keeping up.  We don't want to block the pubsub,
+						// so just drop them.
+						logger.Warn(ctx, "provisioner job log overflowing channel")
+					}
+					logMut.Unlock()
 				}
 			}
+
 			if jlMsg.EndOfLogs {
+				// This mutex is to guard double-closes.
+				logMut.Lock()
+				select {
+				case <-closed:
+					logMut.Unlock()
+					return
+				default:
+				}
 				logger.Debug(ctx, "got End of Logs")
+
+				close(closed)
 				close(bufferedLogs)
+				logMut.Unlock()
 			}
-		})
+		},
+	)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -3,12 +3,14 @@ package wsconncache_test
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"cdr.dev/slog/sloggers/slogtest"
 	"github.com/coder/coder/agent"
 	"github.com/coder/coder/coderd/wsconncache"
+	"github.com/coder/coder/codersdk"
 	"github.com/coder/coder/tailnet"
 	"github.com/coder/coder/tailnet/tailnettest"
 )
@@ -35,8 +38,8 @@ func TestCache(t *testing.T) {
 	t.Parallel()
 	t.Run("Same", func(t *testing.T) {
 		t.Parallel()
-		cache := wsconncache.New(func(r *http.Request, id uuid.UUID) (agent.Conn, error) {
-			return setupAgent(t, agent.Metadata{}, 0), nil
+		cache := wsconncache.New(func(r *http.Request, id uuid.UUID) (*codersdk.AgentConn, error) {
+			return setupAgent(t, codersdk.WorkspaceAgentMetadata{}, 0), nil
 		}, 0)
 		defer func() {
 			_ = cache.Close()
@@ -50,9 +53,9 @@ func TestCache(t *testing.T) {
 	t.Run("Expire", func(t *testing.T) {
 		t.Parallel()
 		called := atomic.NewInt32(0)
-		cache := wsconncache.New(func(r *http.Request, id uuid.UUID) (agent.Conn, error) {
+		cache := wsconncache.New(func(r *http.Request, id uuid.UUID) (*codersdk.AgentConn, error) {
 			called.Add(1)
-			return setupAgent(t, agent.Metadata{}, 0), nil
+			return setupAgent(t, codersdk.WorkspaceAgentMetadata{}, 0), nil
 		}, time.Microsecond)
 		defer func() {
 			_ = cache.Close()
@@ -69,8 +72,8 @@ func TestCache(t *testing.T) {
 	})
 	t.Run("NoExpireWhenLocked", func(t *testing.T) {
 		t.Parallel()
-		cache := wsconncache.New(func(r *http.Request, id uuid.UUID) (agent.Conn, error) {
-			return setupAgent(t, agent.Metadata{}, 0), nil
+		cache := wsconncache.New(func(r *http.Request, id uuid.UUID) (*codersdk.AgentConn, error) {
+			return setupAgent(t, codersdk.WorkspaceAgentMetadata{}, 0), nil
 		}, time.Microsecond)
 		defer func() {
 			_ = cache.Close()
@@ -102,8 +105,8 @@ func TestCache(t *testing.T) {
 		}()
 		go server.Serve(random)
 
-		cache := wsconncache.New(func(r *http.Request, id uuid.UUID) (agent.Conn, error) {
-			return setupAgent(t, agent.Metadata{}, 0), nil
+		cache := wsconncache.New(func(r *http.Request, id uuid.UUID) (*codersdk.AgentConn, error) {
+			return setupAgent(t, codersdk.WorkspaceAgentMetadata{}, 0), nil
 		}, time.Microsecond)
 		defer func() {
 			_ = cache.Close()
@@ -127,7 +130,9 @@ func TestCache(t *testing.T) {
 					return
 				}
 				defer release()
-				proxy.Transport = conn.HTTPTransport()
+				transport := conn.HTTPTransport()
+				defer transport.CloseIdleConnections()
+				proxy.Transport = transport
 				res := httptest.NewRecorder()
 				proxy.ServeHTTP(res, req)
 				resp := res.Result()
@@ -139,23 +144,20 @@ func TestCache(t *testing.T) {
 	})
 }
 
-func setupAgent(t *testing.T, metadata agent.Metadata, ptyTimeout time.Duration) agent.Conn {
+func setupAgent(t *testing.T, metadata codersdk.WorkspaceAgentMetadata, ptyTimeout time.Duration) *codersdk.AgentConn {
 	metadata.DERPMap = tailnettest.RunDERPAndSTUN(t)
 
 	coordinator := tailnet.NewCoordinator()
+	t.Cleanup(func() {
+		_ = coordinator.Close()
+	})
 	agentID := uuid.New()
 	closer := agent.New(agent.Options{
-		FetchMetadata: func(ctx context.Context) (agent.Metadata, error) {
-			return metadata, nil
-		},
-		CoordinatorDialer: func(ctx context.Context) (net.Conn, error) {
-			clientConn, serverConn := net.Pipe()
-			t.Cleanup(func() {
-				_ = serverConn.Close()
-				_ = clientConn.Close()
-			})
-			go coordinator.ServeAgent(serverConn, agentID)
-			return clientConn, nil
+		Client: &client{
+			t:           t,
+			agentID:     agentID,
+			metadata:    metadata,
+			coordinator: coordinator,
 		},
 		Logger:                 slogtest.Make(t, nil).Named("agent").Leveled(slog.LevelInfo),
 		ReconnectingPTYTimeout: ptyTimeout,
@@ -180,7 +182,45 @@ func setupAgent(t *testing.T, metadata agent.Metadata, ptyTimeout time.Duration)
 		return conn.UpdateNodes(node)
 	})
 	conn.SetNodeCallback(sendNode)
-	return &agent.TailnetConn{
+	return &codersdk.AgentConn{
 		Conn: conn,
 	}
+}
+
+type client struct {
+	t           *testing.T
+	agentID     uuid.UUID
+	metadata    codersdk.WorkspaceAgentMetadata
+	coordinator tailnet.Coordinator
+}
+
+func (c *client) WorkspaceAgentMetadata(_ context.Context) (codersdk.WorkspaceAgentMetadata, error) {
+	return c.metadata, nil
+}
+
+func (c *client) ListenWorkspaceAgent(_ context.Context) (net.Conn, error) {
+	clientConn, serverConn := net.Pipe()
+	closed := make(chan struct{})
+	c.t.Cleanup(func() {
+		_ = serverConn.Close()
+		_ = clientConn.Close()
+		<-closed
+	})
+	go func() {
+		_ = c.coordinator.ServeAgent(serverConn, c.agentID)
+		close(closed)
+	}()
+	return clientConn, nil
+}
+
+func (*client) AgentReportStats(_ context.Context, _ slog.Logger, _ func() *codersdk.AgentStats) (io.Closer, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (*client) PostWorkspaceAgentAppHealth(_ context.Context, _ codersdk.PostWorkspaceAppHealthsRequest) error {
+	return nil
+}
+
+func (*client) PostWorkspaceAgentVersion(_ context.Context, _ string) error {
+	return nil
 }

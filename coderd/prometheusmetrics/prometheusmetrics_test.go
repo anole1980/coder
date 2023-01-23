@@ -36,8 +36,10 @@ func TestActiveUsers(t *testing.T) {
 		Database: func() database.Store {
 			db := databasefake.New()
 			_, _ = db.InsertAPIKey(context.Background(), database.InsertAPIKeyParams{
-				UserID:   uuid.New(),
-				LastUsed: database.Now(),
+				UserID:    uuid.New(),
+				LastUsed:  database.Now(),
+				LoginType: database.LoginTypePassword,
+				Scope:     database.APIKeyScopeAll,
 			})
 			return db
 		},
@@ -47,14 +49,18 @@ func TestActiveUsers(t *testing.T) {
 		Database: func() database.Store {
 			db := databasefake.New()
 			_, _ = db.InsertAPIKey(context.Background(), database.InsertAPIKeyParams{
-				UserID:   uuid.New(),
-				LastUsed: database.Now(),
+				UserID:    uuid.New(),
+				LastUsed:  database.Now(),
+				LoginType: database.LoginTypePassword,
+				Scope:     database.APIKeyScopeAll,
 			})
 			// Because this API key hasn't been used in the past hour, this shouldn't
 			// add to the user count.
 			_, _ = db.InsertAPIKey(context.Background(), database.InsertAPIKeyParams{
-				UserID:   uuid.New(),
-				LastUsed: database.Now().Add(-2 * time.Hour),
+				UserID:    uuid.New(),
+				LastUsed:  database.Now().Add(-2 * time.Hour),
+				LoginType: database.LoginTypePassword,
+				Scope:     database.APIKeyScopeAll,
 			})
 			return db
 		},
@@ -64,12 +70,16 @@ func TestActiveUsers(t *testing.T) {
 		Database: func() database.Store {
 			db := databasefake.New()
 			_, _ = db.InsertAPIKey(context.Background(), database.InsertAPIKeyParams{
-				UserID:   uuid.New(),
-				LastUsed: database.Now(),
+				UserID:    uuid.New(),
+				LastUsed:  database.Now(),
+				LoginType: database.LoginTypePassword,
+				Scope:     database.APIKeyScopeAll,
 			})
 			_, _ = db.InsertAPIKey(context.Background(), database.InsertAPIKeyParams{
-				UserID:   uuid.New(),
-				LastUsed: database.Now(),
+				UserID:    uuid.New(),
+				LastUsed:  database.Now(),
+				LoginType: database.LoginTypePassword,
+				Scope:     database.APIKeyScopeAll,
 			})
 			return db
 		},
@@ -97,50 +107,59 @@ func TestWorkspaces(t *testing.T) {
 	t.Parallel()
 
 	insertRunning := func(db database.Store) database.ProvisionerJob {
-		job, _ := db.InsertProvisionerJob(context.Background(), database.InsertProvisionerJobParams{
-			ID:          uuid.New(),
-			CreatedAt:   database.Now(),
-			UpdatedAt:   database.Now(),
-			Provisioner: database.ProvisionerTypeEcho,
+		job, err := db.InsertProvisionerJob(context.Background(), database.InsertProvisionerJobParams{
+			ID:            uuid.New(),
+			CreatedAt:     database.Now(),
+			UpdatedAt:     database.Now(),
+			Provisioner:   database.ProvisionerTypeEcho,
+			StorageMethod: database.ProvisionerStorageMethodFile,
+			Type:          database.ProvisionerJobTypeWorkspaceBuild,
 		})
-		_, _ = db.InsertWorkspaceBuild(context.Background(), database.InsertWorkspaceBuildParams{
+		require.NoError(t, err)
+		_, err = db.InsertWorkspaceBuild(context.Background(), database.InsertWorkspaceBuildParams{
 			ID:          uuid.New(),
 			WorkspaceID: uuid.New(),
 			JobID:       job.ID,
 			BuildNumber: 1,
+			Transition:  database.WorkspaceTransitionStart,
+			Reason:      database.BuildReasonInitiator,
 		})
+		require.NoError(t, err)
 		// This marks the job as started.
-		_, _ = db.AcquireProvisionerJob(context.Background(), database.AcquireProvisionerJobParams{
+		_, err = db.AcquireProvisionerJob(context.Background(), database.AcquireProvisionerJobParams{
 			StartedAt: sql.NullTime{
 				Time:  database.Now(),
 				Valid: true,
 			},
 			Types: []database.ProvisionerType{database.ProvisionerTypeEcho},
 		})
+		require.NoError(t, err)
 		return job
 	}
 
 	insertCanceled := func(db database.Store) {
 		job := insertRunning(db)
-		_ = db.UpdateProvisionerJobWithCancelByID(context.Background(), database.UpdateProvisionerJobWithCancelByIDParams{
+		err := db.UpdateProvisionerJobWithCancelByID(context.Background(), database.UpdateProvisionerJobWithCancelByIDParams{
 			ID: job.ID,
 			CanceledAt: sql.NullTime{
 				Time:  database.Now(),
 				Valid: true,
 			},
 		})
-		_ = db.UpdateProvisionerJobWithCompleteByID(context.Background(), database.UpdateProvisionerJobWithCompleteByIDParams{
+		require.NoError(t, err)
+		err = db.UpdateProvisionerJobWithCompleteByID(context.Background(), database.UpdateProvisionerJobWithCompleteByIDParams{
 			ID: job.ID,
 			CompletedAt: sql.NullTime{
 				Time:  database.Now(),
 				Valid: true,
 			},
 		})
+		require.NoError(t, err)
 	}
 
 	insertFailed := func(db database.Store) {
 		job := insertRunning(db)
-		_ = db.UpdateProvisionerJobWithCompleteByID(context.Background(), database.UpdateProvisionerJobWithCompleteByIDParams{
+		err := db.UpdateProvisionerJobWithCompleteByID(context.Background(), database.UpdateProvisionerJobWithCompleteByIDParams{
 			ID: job.ID,
 			CompletedAt: sql.NullTime{
 				Time:  database.Now(),
@@ -151,17 +170,19 @@ func TestWorkspaces(t *testing.T) {
 				Valid:  true,
 			},
 		})
+		require.NoError(t, err)
 	}
 
 	insertSuccess := func(db database.Store) {
 		job := insertRunning(db)
-		_ = db.UpdateProvisionerJobWithCompleteByID(context.Background(), database.UpdateProvisionerJobWithCompleteByIDParams{
+		err := db.UpdateProvisionerJobWithCompleteByID(context.Background(), database.UpdateProvisionerJobWithCompleteByIDParams{
 			ID: job.ID,
 			CompletedAt: sql.NullTime{
 				Time:  database.Now(),
 				Valid: true,
 			},
 		})
+		require.NoError(t, err)
 	}
 
 	for _, tc := range []struct {
@@ -219,7 +240,9 @@ func TestWorkspaces(t *testing.T) {
 					if !ok {
 						t.Fail()
 					}
-					require.Equal(t, count, int(metric.Gauge.GetValue()), "invalid count for %s", metric.Label[0].GetValue())
+					if metric.Gauge.GetValue() != float64(count) {
+						return false
+					}
 					sum += int(metric.Gauge.GetValue())
 				}
 				t.Logf("sum %d == total %d", sum, tc.Total)

@@ -24,6 +24,8 @@ type LogsEvent = {
 export const workspaceBuildMachine = createMachine(
   {
     id: "workspaceBuildState",
+    predictableActionArguments: true,
+    tsTypes: {} as import("./workspaceBuildXService.typegen").Typegen0,
     schema: {
       context: {} as LogsContext,
       events: {} as LogsEvent,
@@ -36,7 +38,6 @@ export const workspaceBuildMachine = createMachine(
         }
       },
     },
-    tsTypes: {} as import("./workspaceBuildXService.typegen").Typegen0,
     initial: "gettingBuild",
     states: {
       gettingBuild: {
@@ -115,15 +116,23 @@ export const workspaceBuildMachine = createMachine(
     },
     services: {
       getWorkspaceBuild: (ctx) =>
-        API.getWorkspaceBuildByNumber(ctx.username, ctx.workspaceName, ctx.buildNumber),
-      getLogs: async (ctx) => API.getWorkspaceBuildLogs(ctx.buildId, ctx.timeCursor),
+        API.getWorkspaceBuildByNumber(
+          ctx.username,
+          ctx.workspaceName,
+          ctx.buildNumber,
+        ),
+      getLogs: async (ctx) =>
+        API.getWorkspaceBuildLogs(ctx.buildId, ctx.timeCursor),
       streamWorkspaceBuildLogs: (ctx) => async (callback) => {
         return new Promise<void>((resolve, reject) => {
+          if (!ctx.logs) {
+            return reject("logs must be set")
+          }
           const proto = location.protocol === "https:" ? "wss:" : "ws:"
           const socket = new WebSocket(
             `${proto}//${location.host}/api/v2/workspacebuilds/${
               ctx.buildId
-            }/logs?follow=true&after=${ctx.timeCursor.getTime()}`,
+            }/logs?follow=true&after=${ctx.logs[ctx.logs.length - 1].id}`,
           )
           socket.binaryType = "blob"
           socket.addEventListener("message", (event) => {

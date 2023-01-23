@@ -2,7 +2,7 @@
 
 <blockquote class="info">
 This article explains how to use secrets in a workspace. To authenticate the
-workspace provisioner, see <a href="./templates/authentication">this</a>.
+workspace provisioner, see [this](./admin/auth.md).
 </blockquote>
 
 Coder is open-minded about how you get your secrets into your workspaces.
@@ -20,9 +20,19 @@ Often, this workflow is simply:
 1. Your users write them to a persistent file after
    they've built their workspace
 
-<a href="./templates#parameters">Template parameters</a> are a dangerous way to accept secrets.
+[Template parameters](./templates.md#parameters) are a dangerous way to accept secrets.
 We show parameters in cleartext around the product. Assume anyone with view
 access to a workspace can also see its parameters.
+
+## SSH Keys
+
+Coder generates SSH key pairs for each user. This can be used as an authentication mechanism for
+git providers or other tools. Within workspaces, git will attempt to use this key within workspaces
+via the `$GIT_SSH_COMMAND` environment variable.
+
+Users can view their public key in their account settings:
+
+![SSH keys in account settings](./images/ssh-keys.png)
 
 ## Dynamic Secrets
 

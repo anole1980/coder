@@ -8,35 +8,58 @@ import (
 	"github.com/mitchellh/mapstructure"
 	"golang.org/x/xerrors"
 
+	"github.com/coder/terraform-provider-coder/provider"
+
+	"github.com/coder/coder/provisioner"
 	"github.com/coder/coder/provisionersdk/proto"
 )
 
 // A mapping of attributes on the "coder_agent" resource.
 type agentAttributes struct {
-	Auth            string            `mapstructure:"auth"`
-	OperatingSystem string            `mapstructure:"os"`
-	Architecture    string            `mapstructure:"arch"`
-	Directory       string            `mapstructure:"dir"`
-	ID              string            `mapstructure:"id"`
-	Token           string            `mapstructure:"token"`
-	Env             map[string]string `mapstructure:"env"`
-	StartupScript   string            `mapstructure:"startup_script"`
+	Auth                     string            `mapstructure:"auth"`
+	OperatingSystem          string            `mapstructure:"os"`
+	Architecture             string            `mapstructure:"arch"`
+	Directory                string            `mapstructure:"dir"`
+	ID                       string            `mapstructure:"id"`
+	Token                    string            `mapstructure:"token"`
+	Env                      map[string]string `mapstructure:"env"`
+	StartupScript            string            `mapstructure:"startup_script"`
+	ConnectionTimeoutSeconds int32             `mapstructure:"connection_timeout"`
+	TroubleshootingURL       string            `mapstructure:"troubleshooting_url"`
+	MOTDFile                 string            `mapstructure:"motd_file"`
 }
 
 // A mapping of attributes on the "coder_app" resource.
 type agentAppAttributes struct {
-	AgentID      string `mapstructure:"agent_id"`
-	Name         string `mapstructure:"name"`
-	Icon         string `mapstructure:"icon"`
-	URL          string `mapstructure:"url"`
-	Command      string `mapstructure:"command"`
-	RelativePath bool   `mapstructure:"relative_path"`
+	AgentID string `mapstructure:"agent_id"`
+	// Slug is required in terraform, but to avoid breaking existing users we
+	// will default to the resource name if it is not specified.
+	Slug        string `mapstructure:"slug"`
+	DisplayName string `mapstructure:"display_name"`
+	// Name is deprecated in favor of DisplayName.
+	Name        string                     `mapstructure:"name"`
+	Icon        string                     `mapstructure:"icon"`
+	URL         string                     `mapstructure:"url"`
+	External    bool                       `mapstructure:"external"`
+	Command     string                     `mapstructure:"command"`
+	Share       string                     `mapstructure:"share"`
+	Subdomain   bool                       `mapstructure:"subdomain"`
+	Healthcheck []appHealthcheckAttributes `mapstructure:"healthcheck"`
+}
+
+// A mapping of attributes on the "healthcheck" resource.
+type appHealthcheckAttributes struct {
+	URL       string `mapstructure:"url"`
+	Interval  int32  `mapstructure:"interval"`
+	Threshold int32  `mapstructure:"threshold"`
 }
 
 // A mapping of attributes on the "coder_metadata" resource.
 type metadataAttributes struct {
 	ResourceID string         `mapstructure:"resource_id"`
 	Hide       bool           `mapstructure:"hide"`
+	Icon       string         `mapstructure:"icon"`
+	DailyCost  int32          `mapstructure:"daily_cost"`
 	Items      []metadataItem `mapstructure:"item"`
 }
 
@@ -47,29 +70,25 @@ type metadataItem struct {
 	IsNull    bool   `mapstructure:"is_null"`
 }
 
-// ConvertResources consumes Terraform state and a GraphViz representation produced by
-// `terraform graph` to produce resources consumable by Coder.
+// ConvertResourcesAndParameters consumes Terraform state and a GraphViz representation
+// produced by `terraform graph` to produce resources consumable by Coder.
 // nolint:gocyclo
-func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Resource, error) {
+func ConvertResourcesAndParameters(modules []*tfjson.StateModule, rawGraph string) ([]*proto.Resource, []*proto.RichParameter, error) {
 	parsedGraph, err := gographviz.ParseString(rawGraph)
 	if err != nil {
-		return nil, xerrors.Errorf("parse graph: %w", err)
+		return nil, nil, xerrors.Errorf("parse graph: %w", err)
 	}
 	graph, err := gographviz.NewAnalysedGraph(parsedGraph)
 	if err != nil {
-		return nil, xerrors.Errorf("analyze graph: %w", err)
+		return nil, nil, xerrors.Errorf("analyze graph: %w", err)
 	}
 
 	resources := make([]*proto.Resource, 0)
 	resourceAgents := map[string][]*proto.Agent{}
 
-	// Indexes Terraform resources by their label and ID.
-	// The label is what "terraform graph" uses to reference nodes, and the ID
-	// is used by "coder_metadata" resources to refer to their targets. (The ID
-	// field is only available when reading a state file, and not when reading a
-	// plan file.)
+	// Indexes Terraform resources by their label.
+	// The label is what "terraform graph" uses to reference nodes.
 	tfResourceByLabel := map[string]*tfjson.StateResource{}
-	resourceLabelByID := map[string]string{}
 	var findTerraformResources func(mod *tfjson.StateModule)
 	findTerraformResources = func(mod *tfjson.StateModule) {
 		for _, module := range mod.ChildModules {
@@ -79,19 +98,14 @@ func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Res
 			label := convertAddressToLabel(resource.Address)
 			// index by label
 			tfResourceByLabel[label] = resource
-			// index by ID, if it exists
-			id, ok := resource.AttributeValues["id"]
-			if ok {
-				idString, ok := id.(string)
-				if ok {
-					resourceLabelByID[idString] = label
-				}
-			}
 		}
 	}
-	findTerraformResources(module)
+	for _, module := range modules {
+		findTerraformResources(module)
+	}
 
 	// Find all agents!
+	agentNames := map[string]struct{}{}
 	for _, tfResource := range tfResourceByLabel {
 		if tfResource.Type != "coder_agent" {
 			continue
@@ -99,16 +113,25 @@ func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Res
 		var attrs agentAttributes
 		err = mapstructure.Decode(tfResource.AttributeValues, &attrs)
 		if err != nil {
-			return nil, xerrors.Errorf("decode agent attributes: %w", err)
+			return nil, nil, xerrors.Errorf("decode agent attributes: %w", err)
 		}
+
+		if _, ok := agentNames[tfResource.Name]; ok {
+			return nil, nil, xerrors.Errorf("duplicate agent name: %s", tfResource.Name)
+		}
+		agentNames[tfResource.Name] = struct{}{}
+
 		agent := &proto.Agent{
-			Name:            tfResource.Name,
-			Id:              attrs.ID,
-			Env:             attrs.Env,
-			StartupScript:   attrs.StartupScript,
-			OperatingSystem: attrs.OperatingSystem,
-			Architecture:    attrs.Architecture,
-			Directory:       attrs.Directory,
+			Name:                     tfResource.Name,
+			Id:                       attrs.ID,
+			Env:                      attrs.Env,
+			StartupScript:            attrs.StartupScript,
+			OperatingSystem:          attrs.OperatingSystem,
+			Architecture:             attrs.Architecture,
+			Directory:                attrs.Directory,
+			ConnectionTimeoutSeconds: attrs.ConnectionTimeoutSeconds,
+			TroubleshootingUrl:       attrs.TroubleshootingURL,
+			MotdFile:                 attrs.MOTDFile,
 		}
 		switch attrs.Auth {
 		case "token":
@@ -135,7 +158,7 @@ func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Res
 			break
 		}
 		if agentNode == nil {
-			return nil, xerrors.Errorf("couldn't find node on graph: %q", agentLabel)
+			return nil, nil, xerrors.Errorf("couldn't find node on graph: %q", agentLabel)
 		}
 
 		var agentResource *graphResource
@@ -195,8 +218,15 @@ func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Res
 				if agent.Id != agentID {
 					continue
 				}
-				agent.Auth = &proto.Agent_InstanceId{
-					InstanceId: instanceID,
+				// Only apply the instance ID if the agent authentication
+				// type is set to do so. A user ran into a bug where they
+				// had the instance ID block, but auth was set to "token". See:
+				// https://github.com/coder/coder/issues/4551#issuecomment-1336293468
+				switch t := agent.Auth.(type) {
+				case *proto.Agent_Token:
+					continue
+				case *proto.Agent_InstanceId:
+					t.InstanceId = instanceID
 				}
 				break
 			}
@@ -204,19 +234,59 @@ func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Res
 	}
 
 	// Associate Apps with agents.
+	appSlugs := make(map[string]struct{})
 	for _, resource := range tfResourceByLabel {
 		if resource.Type != "coder_app" {
 			continue
 		}
+
 		var attrs agentAppAttributes
 		err = mapstructure.Decode(resource.AttributeValues, &attrs)
 		if err != nil {
-			return nil, xerrors.Errorf("decode app attributes: %w", err)
+			return nil, nil, xerrors.Errorf("decode app attributes: %w", err)
 		}
-		if attrs.Name == "" {
-			// Default to the resource name if none is set!
-			attrs.Name = resource.Name
+
+		// Default to the resource name if none is set!
+		if attrs.Slug == "" {
+			attrs.Slug = resource.Name
 		}
+		if attrs.DisplayName == "" {
+			if attrs.Name != "" {
+				// Name is deprecated but still accepted.
+				attrs.DisplayName = attrs.Name
+			} else {
+				attrs.DisplayName = attrs.Slug
+			}
+		}
+
+		if !provisioner.AppSlugRegex.MatchString(attrs.Slug) {
+			return nil, nil, xerrors.Errorf("invalid app slug %q, please update your coder/coder provider to the latest version and specify the slug property on each coder_app", attrs.Slug)
+		}
+
+		if _, exists := appSlugs[attrs.Slug]; exists {
+			return nil, nil, xerrors.Errorf("duplicate app slug, they must be unique per template: %q", attrs.Slug)
+		}
+		appSlugs[attrs.Slug] = struct{}{}
+
+		var healthcheck *proto.Healthcheck
+		if len(attrs.Healthcheck) != 0 {
+			healthcheck = &proto.Healthcheck{
+				Url:       attrs.Healthcheck[0].URL,
+				Interval:  attrs.Healthcheck[0].Interval,
+				Threshold: attrs.Healthcheck[0].Threshold,
+			}
+		}
+
+		sharingLevel := proto.AppSharingLevel_OWNER
+		switch strings.ToLower(attrs.Share) {
+		case "owner":
+			sharingLevel = proto.AppSharingLevel_OWNER
+		case "authenticated":
+			sharingLevel = proto.AppSharingLevel_AUTHENTICATED
+		case "public":
+			sharingLevel = proto.AppSharingLevel_PUBLIC
+		}
+
 		for _, agents := range resourceAgents {
 			for _, agent := range agents {
 				// Find agents with the matching ID and associate them!
@@ -224,11 +294,15 @@ func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Res
 					continue
 				}
 				agent.Apps = append(agent.Apps, &proto.App{
-					Name:         attrs.Name,
+					Slug:         attrs.Slug,
+					DisplayName:  attrs.DisplayName,
 					Command:      attrs.Command,
+					External:     attrs.External,
 					Url:          attrs.URL,
 					Icon:         attrs.Icon,
-					RelativePath: attrs.RelativePath,
+					Subdomain:    attrs.Subdomain,
+					SharingLevel: sharingLevel,
+					Healthcheck:  healthcheck,
 				})
 			}
 		}
@@ -237,64 +311,59 @@ func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Res
 	// Associate metadata blocks with resources.
 	resourceMetadata := map[string][]*proto.Resource_Metadata{}
 	resourceHidden := map[string]bool{}
+	resourceIcon := map[string]string{}
+	resourceCost := map[string]int32{}
+
 	for _, resource := range tfResourceByLabel {
 		if resource.Type != "coder_metadata" {
 			continue
 		}
+
 		var attrs metadataAttributes
 		err = mapstructure.Decode(resource.AttributeValues, &attrs)
 		if err != nil {
-			return nil, xerrors.Errorf("decode metadata attributes: %w", err)
+			return nil, nil, xerrors.Errorf("decode metadata attributes: %w", err)
 		}
 
-		var targetLabel string
-		// This occurs in a plan, because there is no resource ID.
-		// We attempt to find the closest node, just so we can hide it from the UI.
-		if attrs.ResourceID == "" {
-			resourceLabel := convertAddressToLabel(resource.Address)
+		resourceLabel := convertAddressToLabel(resource.Address)
 
-			var attachedNode *gographviz.Node
-			for _, node := range graph.Nodes.Lookup {
-				// The node attributes surround the label with quotes.
-				if strings.Trim(node.Attrs["label"], `"`) != resourceLabel {
-					continue
-				}
-				attachedNode = node
-				break
-			}
-			if attachedNode == nil {
+		var attachedNode *gographviz.Node
+		for _, node := range graph.Nodes.Lookup {
+			// The node attributes surround the label with quotes.
+			if strings.Trim(node.Attrs["label"], `"`) != resourceLabel {
 				continue
 			}
-			var attachedResource *graphResource
-			for _, resource := range findResourcesInGraph(graph, tfResourceByLabel, attachedNode.Name, 0, false) {
-				if attachedResource == nil {
-					// Default to the first resource because we have nothing to compare!
-					attachedResource = resource
-					continue
-				}
-				if resource.Depth < attachedResource.Depth {
-					// There's a closer resource!
-					attachedResource = resource
-					continue
-				}
-				if resource.Depth == attachedResource.Depth && resource.Label < attachedResource.Label {
-					attachedResource = resource
-					continue
-				}
-			}
-			if attachedResource == nil {
-				continue
-			}
-			targetLabel = attachedResource.Label
+			attachedNode = node
+			break
 		}
-		if targetLabel == "" {
-			targetLabel = resourceLabelByID[attrs.ResourceID]
-		}
-		if targetLabel == "" {
+		if attachedNode == nil {
 			continue
 		}
+		var attachedResource *graphResource
+		for _, resource := range findResourcesInGraph(graph, tfResourceByLabel, attachedNode.Name, 0, false) {
+			if attachedResource == nil {
+				// Default to the first resource because we have nothing to compare!
+				attachedResource = resource
+				continue
+			}
+			if resource.Depth < attachedResource.Depth {
+				// There's a closer resource!
+				attachedResource = resource
+				continue
+			}
+			if resource.Depth == attachedResource.Depth && resource.Label < attachedResource.Label {
+				attachedResource = resource
+				continue
+			}
+		}
+		if attachedResource == nil {
+			continue
+		}
+		targetLabel := attachedResource.Label
 
 		resourceHidden[targetLabel] = attrs.Hide
+		resourceIcon[targetLabel] = attrs.Icon
+		resourceCost[targetLabel] = attrs.DailyCost
 		for _, item := range attrs.Items {
 			resourceMetadata[targetLabel] = append(resourceMetadata[targetLabel],
 				&proto.Resource_Metadata{
@@ -321,26 +390,93 @@ func ConvertResources(module *tfjson.StateModule, rawGraph string) ([]*proto.Res
 		}
 
 		resources = append(resources, &proto.Resource{
-			Name:     resource.Name,
-			Type:     resource.Type,
-			Agents:   agents,
-			Hide:     resourceHidden[label],
-			Metadata: resourceMetadata[label],
+			Name:         resource.Name,
+			Type:         resource.Type,
+			Agents:       agents,
+			Metadata:     resourceMetadata[label],
+			Hide:         resourceHidden[label],
+			Icon:         resourceIcon[label],
+			DailyCost:    resourceCost[label],
+			InstanceType: applyInstanceType(resource),
 		})
 	}
 
-	return resources, nil
+	parameters := make([]*proto.RichParameter, 0)
+	for _, resource := range tfResourceByLabel {
+		if resource.Type != "coder_parameter" {
+			continue
+		}
+		var param provider.Parameter
+		err = mapstructure.Decode(resource.AttributeValues, &param)
+		if err != nil {
+			return nil, nil, xerrors.Errorf("decode map values for coder_parameter.%s: %w", resource.Name, err)
+		}
+		protoParam := &proto.RichParameter{
+			Name:         param.Name,
+			Description:  param.Description,
+			Type:         param.Type,
+			Mutable:      param.Mutable,
+			DefaultValue: param.Default,
+			Icon:         param.Icon,
+		}
+		if len(param.Validation) == 1 {
+			protoParam.ValidationRegex = param.Validation[0].Regex
+			protoParam.ValidationMax = int32(param.Validation[0].Max)
+			protoParam.ValidationMin = int32(param.Validation[0].Min)
+		}
+		if len(param.Option) > 0 {
+			protoParam.Options = make([]*proto.RichParameterOption, 0, len(param.Option))
+			for _, option := range param.Option {
+				protoParam.Options = append(protoParam.Options, &proto.RichParameterOption{
+					Name:        option.Name,
+					Description: option.Description,
+					Value:       option.Value,
+					Icon:        option.Icon,
+				})
+			}
+		}
+		parameters = append(parameters, protoParam)
+	}
+
+	return resources, parameters, nil
 }
 
 // convertAddressToLabel returns the Terraform address without the count
-// specifier. eg. "module.ec2_dev.ec2_instance.dev[0]" becomes "module.ec2_dev.ec2_instance.dev"
+// specifier.
+// eg. "module.ec2_dev.ec2_instance.dev[0]" becomes "module.ec2_dev.ec2_instance.dev"
 func convertAddressToLabel(address string) string {
-	return strings.Split(address, "[")[0]
+	cut, _, _ := strings.Cut(address, "[")
+	return cut
 }
 
 type graphResource struct {
 	Label string
 	Depth uint
+}
+
+// applyInstanceType sets the instance type on an agent if it matches
+// one of the special resource types that we track.
+func applyInstanceType(resource *tfjson.StateResource) string {
+	key, isValid := map[string]string{
+		"google_compute_instance":         "machine_type",
+		"aws_instance":                    "instance_type",
+		"aws_spot_instance_request":       "instance_type",
+		"azurerm_linux_virtual_machine":   "size",
+		"azurerm_windows_virtual_machine": "size",
+	}[resource.Type]
+	if !isValid {
+		return ""
+	}
+
+	instanceTypeRaw, isValid := resource.AttributeValues[key]
+	if !isValid {
+		return ""
+	}
+	instanceType, isValid := instanceTypeRaw.(string)
+	if !isValid {
+		return ""
+	}
+	return instanceType
 }
 
 // applyAutomaticInstanceID checks if the resource is one of a set of *magical* IDs

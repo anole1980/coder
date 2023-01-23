@@ -10,39 +10,91 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/netip"
+	"net/url"
+	"strconv"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/google/uuid"
-	"github.com/hashicorp/yamux"
-	"github.com/pion/webrtc/v3"
-	"golang.org/x/net/proxy"
 	"golang.org/x/xerrors"
 	"nhooyr.io/websocket"
-	"nhooyr.io/websocket/wsjson"
 	"tailscale.com/tailcfg"
 
 	"cdr.dev/slog"
-
-	"github.com/coder/coder/agent"
-	"github.com/coder/coder/coderd/turnconn"
-	"github.com/coder/coder/peer"
-	"github.com/coder/coder/peerbroker"
-	"github.com/coder/coder/peerbroker/proto"
-	"github.com/coder/coder/provisionersdk"
 	"github.com/coder/coder/tailnet"
 	"github.com/coder/retry"
 )
 
+type WorkspaceAgentStatus string
+
+const (
+	WorkspaceAgentConnecting   WorkspaceAgentStatus = "connecting"
+	WorkspaceAgentConnected    WorkspaceAgentStatus = "connected"
+	WorkspaceAgentDisconnected WorkspaceAgentStatus = "disconnected"
+	WorkspaceAgentTimeout      WorkspaceAgentStatus = "timeout"
+)
+
+type WorkspaceAgent struct {
+	ID                   uuid.UUID            `json:"id" format:"uuid"`
+	CreatedAt            time.Time            `json:"created_at" format:"date-time"`
+	UpdatedAt            time.Time            `json:"updated_at" format:"date-time"`
+	FirstConnectedAt     *time.Time           `json:"first_connected_at,omitempty" format:"date-time"`
+	LastConnectedAt      *time.Time           `json:"last_connected_at,omitempty" format:"date-time"`
+	DisconnectedAt       *time.Time           `json:"disconnected_at,omitempty" format:"date-time"`
+	Status               WorkspaceAgentStatus `json:"status" enums:"connecting,connected,disconnected,timeout"`
+	Name                 string               `json:"name"`
+	ResourceID           uuid.UUID            `json:"resource_id" format:"uuid"`
+	InstanceID           string               `json:"instance_id,omitempty"`
+	Architecture         string               `json:"architecture"`
+	EnvironmentVariables map[string]string    `json:"environment_variables"`
+	OperatingSystem      string               `json:"operating_system"`
+	StartupScript        string               `json:"startup_script,omitempty"`
+	Directory            string               `json:"directory,omitempty"`
+	Version              string               `json:"version"`
+	Apps                 []WorkspaceApp       `json:"apps"`
+	// DERPLatency is mapped by region name (e.g. "New York City", "Seattle").
+	DERPLatency              map[string]DERPRegion `json:"latency,omitempty"`
+	ConnectionTimeoutSeconds int32                 `json:"connection_timeout_seconds"`
+	TroubleshootingURL       string                `json:"troubleshooting_url"`
+}
+
+type WorkspaceAgentResourceMetadata struct {
+	MemoryTotal uint64  `json:"memory_total"`
+	DiskTotal   uint64  `json:"disk_total"`
+	CPUCores    uint64  `json:"cpu_cores"`
+	CPUModel    string  `json:"cpu_model"`
+	CPUMhz      float64 `json:"cpu_mhz"`
+}
+
+type DERPRegion struct {
+	Preferred           bool    `json:"preferred"`
+	LatencyMilliseconds float64 `json:"latency_ms"`
+}
+
+type WorkspaceAgentInstanceMetadata struct {
+	JailOrchestrator   string `json:"jail_orchestrator"`
+	OperatingSystem    string `json:"operating_system"`
+	Platform           string `json:"platform"`
+	PlatformFamily     string `json:"platform_family"`
+	KernelVersion      string `json:"kernel_version"`
+	KernelArchitecture string `json:"kernel_architecture"`
+	Cloud              string `json:"cloud"`
+	Jail               string `json:"jail"`
+	VNC                bool   `json:"vnc"`
+}
+
+// @typescript-ignore GoogleInstanceIdentityToken
 type GoogleInstanceIdentityToken struct {
 	JSONWebToken string `json:"json_web_token" validate:"required"`
 }
 
+// @typescript-ignore AWSInstanceIdentityToken
 type AWSInstanceIdentityToken struct {
 	Signature string `json:"signature" validate:"required"`
 	Document  string `json:"document" validate:"required"`
 }
 
+// @typescript-ignore ReconnectingPTYRequest
 type AzureInstanceIdentityToken struct {
 	Signature string `json:"signature" validate:"required"`
 	Encoding  string `json:"encoding" validate:"required"`
@@ -50,18 +102,37 @@ type AzureInstanceIdentityToken struct {
 
 // WorkspaceAgentAuthenticateResponse is returned when an instance ID
 // has been exchanged for a session token.
+// @typescript-ignore WorkspaceAgentAuthenticateResponse
 type WorkspaceAgentAuthenticateResponse struct {
 	SessionToken string `json:"session_token"`
 }
 
 // WorkspaceAgentConnectionInfo returns required information for establishing
 // a connection with a workspace.
+// @typescript-ignore WorkspaceAgentConnectionInfo
 type WorkspaceAgentConnectionInfo struct {
 	DERPMap *tailcfg.DERPMap `json:"derp_map"`
 }
 
+// @typescript-ignore PostWorkspaceAgentVersionRequest
+// @Description x-apidocgen:skip
 type PostWorkspaceAgentVersionRequest struct {
 	Version string `json:"version"`
+}
+
+// @typescript-ignore WorkspaceAgentMetadata
+type WorkspaceAgentMetadata struct {
+	// GitAuthConfigs stores the number of Git configurations
+	// the Coder deployment has. If this number is >0, we
+	// set up special configuration in the workspace.
+	GitAuthConfigs       int               `json:"git_auth_configs"`
+	VSCodePortProxyURI   string            `json:"vscode_port_proxy_uri"`
+	Apps                 []WorkspaceApp    `json:"apps"`
+	DERPMap              *tailcfg.DERPMap  `json:"derpmap"`
+	EnvironmentVariables map[string]string `json:"environment_variables"`
+	StartupScript        string            `json:"startup_script"`
+	Directory            string            `json:"directory"`
+	MOTDFile             string            `json:"motd_file"`
 }
 
 // AuthWorkspaceGoogleInstanceIdentity uses the Google Compute Engine Metadata API to
@@ -193,83 +264,55 @@ func (c *Client) AuthWorkspaceAzureInstanceIdentity(ctx context.Context) (Worksp
 }
 
 // WorkspaceAgentMetadata fetches metadata for the currently authenticated workspace agent.
-func (c *Client) WorkspaceAgentMetadata(ctx context.Context) (agent.Metadata, error) {
+func (c *Client) WorkspaceAgentMetadata(ctx context.Context) (WorkspaceAgentMetadata, error) {
 	res, err := c.Request(ctx, http.MethodGet, "/api/v2/workspaceagents/me/metadata", nil)
 	if err != nil {
-		return agent.Metadata{}, err
+		return WorkspaceAgentMetadata{}, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return agent.Metadata{}, readBodyAsError(res)
+		return WorkspaceAgentMetadata{}, readBodyAsError(res)
 	}
-	var agentMetadata agent.Metadata
-	return agentMetadata, json.NewDecoder(res.Body).Decode(&agentMetadata)
+	var agentMetadata WorkspaceAgentMetadata
+	err = json.NewDecoder(res.Body).Decode(&agentMetadata)
+	if err != nil {
+		return WorkspaceAgentMetadata{}, err
+	}
+	accessingPort := c.URL.Port()
+	if accessingPort == "" {
+		accessingPort = "80"
+		if c.URL.Scheme == "https" {
+			accessingPort = "443"
+		}
+	}
+	accessPort, err := strconv.Atoi(accessingPort)
+	if err != nil {
+		return WorkspaceAgentMetadata{}, xerrors.Errorf("convert accessing port %q: %w", accessingPort, err)
+	}
+	// Agents can provide an arbitrary access URL that may be different
+	// that the globally configured one. This breaks the built-in DERP,
+	// which would continue to reference the global access URL.
+	//
+	// This converts all built-in DERPs to use the access URL that the
+	// metadata request was performed with.
+	for _, region := range agentMetadata.DERPMap.Regions {
+		if !region.EmbeddedRelay {
+			continue
+		}
+
+		for _, node := range region.Nodes {
+			if node.STUNOnly {
+				continue
+			}
+			node.HostName = c.URL.Hostname()
+			node.DERPPort = accessPort
+			node.ForceHTTP = c.URL.Scheme == "http"
+		}
+	}
+	return agentMetadata, nil
 }
 
-// ListenWorkspaceAgent connects as a workspace agent identifying with the session token.
-// On each inbound connection request, connection info is fetched.
-func (c *Client) ListenWorkspaceAgent(ctx context.Context, logger slog.Logger) (*peerbroker.Listener, error) {
-	serverURL, err := c.URL.Parse("/api/v2/workspaceagents/me/listen")
-	if err != nil {
-		return nil, xerrors.Errorf("parse url: %w", err)
-	}
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, xerrors.Errorf("create cookie jar: %w", err)
-	}
-	jar.SetCookies(serverURL, []*http.Cookie{{
-		Name:  SessionTokenKey,
-		Value: c.SessionToken,
-	}})
-	httpClient := &http.Client{
-		Jar: jar,
-	}
-	conn, res, err := websocket.Dial(ctx, serverURL.String(), &websocket.DialOptions{
-		HTTPClient: httpClient,
-		// Need to disable compression to avoid a data-race.
-		CompressionMode: websocket.CompressionDisabled,
-	})
-	if err != nil {
-		if res == nil {
-			return nil, err
-		}
-		return nil, readBodyAsError(res)
-	}
-	config := yamux.DefaultConfig()
-	config.LogOutput = io.Discard
-	session, err := yamux.Client(websocket.NetConn(ctx, conn, websocket.MessageBinary), config)
-	if err != nil {
-		return nil, xerrors.Errorf("multiplex client: %w", err)
-	}
-	return peerbroker.Listen(session, func(ctx context.Context) ([]webrtc.ICEServer, *peer.ConnOptions, error) {
-		// This can be cached if it adds to latency too much.
-		res, err := c.Request(ctx, http.MethodGet, "/api/v2/workspaceagents/me/iceservers", nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			return nil, nil, readBodyAsError(res)
-		}
-		var iceServers []webrtc.ICEServer
-		err = json.NewDecoder(res.Body).Decode(&iceServers)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		options := webrtc.SettingEngine{}
-		options.SetSrflxAcceptanceMinWait(0)
-		options.SetRelayAcceptanceMinWait(0)
-		options.SetICEProxyDialer(c.turnProxyDialer(ctx, httpClient, "/api/v2/workspaceagents/me/turn"))
-		iceServers = append(iceServers, turnconn.Proxy)
-		return iceServers, &peer.ConnOptions{
-			SettingEngine: options,
-			Logger:        logger,
-		}, nil
-	})
-}
-
-func (c *Client) ListenWorkspaceAgentTailnet(ctx context.Context) (net.Conn, error) {
+func (c *Client) ListenWorkspaceAgent(ctx context.Context) (net.Conn, error) {
 	coordinateURL, err := c.URL.Parse("/api/v2/workspaceagents/me/coordinate")
 	if err != nil {
 		return nil, xerrors.Errorf("parse url: %w", err)
@@ -280,23 +323,38 @@ func (c *Client) ListenWorkspaceAgentTailnet(ctx context.Context) (net.Conn, err
 	}
 	jar.SetCookies(coordinateURL, []*http.Cookie{{
 		Name:  SessionTokenKey,
-		Value: c.SessionToken,
+		Value: c.SessionToken(),
 	}})
 	httpClient := &http.Client{
-		Jar: jar,
+		Jar:       jar,
+		Transport: c.HTTPClient.Transport,
 	}
 	// nolint:bodyclose
-	conn, _, err := websocket.Dial(ctx, coordinateURL.String(), &websocket.DialOptions{
+	conn, res, err := websocket.Dial(ctx, coordinateURL.String(), &websocket.DialOptions{
 		HTTPClient: httpClient,
 	})
 	if err != nil {
-		return nil, err
+		if res == nil {
+			return nil, err
+		}
+		return nil, readBodyAsError(res)
 	}
 
 	return websocket.NetConn(ctx, conn, websocket.MessageBinary), nil
 }
 
-func (c *Client) DialWorkspaceAgentTailnet(ctx context.Context, logger slog.Logger, agentID uuid.UUID) (agent.Conn, error) {
+// @typescript-ignore DialWorkspaceAgentOptions
+type DialWorkspaceAgentOptions struct {
+	Logger slog.Logger
+	// BlockEndpoints forced a direct connection through DERP.
+	BlockEndpoints     bool
+	EnableTrafficStats bool
+}
+
+func (c *Client) DialWorkspaceAgent(ctx context.Context, agentID uuid.UUID, options *DialWorkspaceAgentOptions) (*AgentConn, error) {
+	if options == nil {
+		options = &DialWorkspaceAgentOptions{}
+	}
 	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/workspaceagents/%s/connection", agentID), nil)
 	if err != nil {
 		return nil, err
@@ -313,9 +371,11 @@ func (c *Client) DialWorkspaceAgentTailnet(ctx context.Context, logger slog.Logg
 
 	ip := tailnet.IP()
 	conn, err := tailnet.NewConn(&tailnet.Options{
-		Addresses: []netip.Prefix{netip.PrefixFrom(ip, 128)},
-		DERPMap:   connInfo.DERPMap,
-		Logger:    logger,
+		Addresses:          []netip.Prefix{netip.PrefixFrom(ip, 128)},
+		DERPMap:            connInfo.DERPMap,
+		Logger:             options.Logger,
+		BlockEndpoints:     options.BlockEndpoints,
+		EnableTrafficStats: options.EnableTrafficStats,
 	})
 	if err != nil {
 		return nil, xerrors.Errorf("create tailnet: %w", err)
@@ -331,123 +391,72 @@ func (c *Client) DialWorkspaceAgentTailnet(ctx context.Context, logger slog.Logg
 	}
 	jar.SetCookies(coordinateURL, []*http.Cookie{{
 		Name:  SessionTokenKey,
-		Value: c.SessionToken,
+		Value: c.SessionToken(),
 	}})
 	httpClient := &http.Client{
-		Jar: jar,
+		Jar:       jar,
+		Transport: c.HTTPClient.Transport,
 	}
 	ctx, cancelFunc := context.WithCancel(ctx)
 	closed := make(chan struct{})
+	first := make(chan error)
 	go func() {
 		defer close(closed)
+		isFirst := true
 		for retrier := retry.New(50*time.Millisecond, 10*time.Second); retrier.Wait(ctx); {
-			logger.Debug(ctx, "connecting")
+			options.Logger.Debug(ctx, "connecting")
 			// nolint:bodyclose
-			ws, _, err := websocket.Dial(ctx, coordinateURL.String(), &websocket.DialOptions{
+			ws, res, err := websocket.Dial(ctx, coordinateURL.String(), &websocket.DialOptions{
 				HTTPClient: httpClient,
 				// Need to disable compression to avoid a data-race.
 				CompressionMode: websocket.CompressionDisabled,
 			})
-			if errors.Is(err, context.Canceled) {
-				return
+			if isFirst {
+				if res != nil && res.StatusCode == http.StatusConflict {
+					first <- readBodyAsError(res)
+					return
+				}
+				isFirst = false
+				close(first)
 			}
 			if err != nil {
-				logger.Debug(ctx, "failed to dial", slog.Error(err))
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				options.Logger.Debug(ctx, "failed to dial", slog.Error(err))
 				continue
 			}
 			sendNode, errChan := tailnet.ServeCoordinator(websocket.NetConn(ctx, ws, websocket.MessageBinary), func(node []*tailnet.Node) error {
 				return conn.UpdateNodes(node)
 			})
 			conn.SetNodeCallback(sendNode)
-			logger.Debug(ctx, "serving coordinator")
+			options.Logger.Debug(ctx, "serving coordinator")
 			err = <-errChan
 			if errors.Is(err, context.Canceled) {
+				_ = ws.Close(websocket.StatusGoingAway, "")
 				return
 			}
 			if err != nil {
-				logger.Debug(ctx, "error serving coordinator", slog.Error(err))
+				options.Logger.Debug(ctx, "error serving coordinator", slog.Error(err))
+				_ = ws.Close(websocket.StatusGoingAway, "")
 				continue
 			}
+			_ = ws.Close(websocket.StatusGoingAway, "")
 		}
 	}()
-	return &agent.TailnetConn{
+	err = <-first
+	if err != nil {
+		cancelFunc()
+		_ = conn.Close()
+		return nil, err
+	}
+
+	return &AgentConn{
 		Conn: conn,
 		CloseFunc: func() {
 			cancelFunc()
 			<-closed
 		},
-	}, nil
-}
-
-// DialWorkspaceAgent creates a connection to the specified resource.
-func (c *Client) DialWorkspaceAgent(ctx context.Context, agentID uuid.UUID, options *peer.ConnOptions) (agent.Conn, error) {
-	serverURL, err := c.URL.Parse(fmt.Sprintf("/api/v2/workspaceagents/%s/dial", agentID.String()))
-	if err != nil {
-		return nil, xerrors.Errorf("parse url: %w", err)
-	}
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, xerrors.Errorf("create cookie jar: %w", err)
-	}
-	jar.SetCookies(serverURL, []*http.Cookie{{
-		Name:  SessionTokenKey,
-		Value: c.SessionToken,
-	}})
-	httpClient := &http.Client{
-		Jar: jar,
-	}
-	conn, res, err := websocket.Dial(ctx, serverURL.String(), &websocket.DialOptions{
-		HTTPClient: httpClient,
-		// Need to disable compression to avoid a data-race.
-		CompressionMode: websocket.CompressionDisabled,
-	})
-	if err != nil {
-		if res == nil {
-			return nil, err
-		}
-		return nil, readBodyAsError(res)
-	}
-	config := yamux.DefaultConfig()
-	config.LogOutput = io.Discard
-	session, err := yamux.Client(websocket.NetConn(ctx, conn, websocket.MessageBinary), config)
-	if err != nil {
-		return nil, xerrors.Errorf("multiplex client: %w", err)
-	}
-	client := proto.NewDRPCPeerBrokerClient(provisionersdk.Conn(session))
-	stream, err := client.NegotiateConnection(ctx)
-	if err != nil {
-		return nil, xerrors.Errorf("negotiate connection: %w", err)
-	}
-
-	res, err = c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/workspaceagents/%s/iceservers", agentID.String()), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return nil, readBodyAsError(res)
-	}
-	var iceServers []webrtc.ICEServer
-	err = json.NewDecoder(res.Body).Decode(&iceServers)
-	if err != nil {
-		return nil, err
-	}
-
-	if options == nil {
-		options = &peer.ConnOptions{}
-	}
-	options.SettingEngine.SetSrflxAcceptanceMinWait(0)
-	options.SettingEngine.SetRelayAcceptanceMinWait(0)
-	options.SettingEngine.SetICEProxyDialer(c.turnProxyDialer(ctx, httpClient, fmt.Sprintf("/api/v2/workspaceagents/%s/turn", agentID.String())))
-	iceServers = append(iceServers, turnconn.Proxy)
-
-	peerConn, err := peerbroker.Dial(stream, iceServers, options)
-	if err != nil {
-		return nil, xerrors.Errorf("dial peer: %w", err)
-	}
-	return &agent.WebRTCConn{
-		Negotiator: client,
-		Conn:       peerConn,
 	}, nil
 }
 
@@ -465,34 +474,55 @@ func (c *Client) WorkspaceAgent(ctx context.Context, id uuid.UUID) (WorkspaceAge
 	return workspaceAgent, json.NewDecoder(res.Body).Decode(&workspaceAgent)
 }
 
+// PostWorkspaceAgentAppHealth updates the workspace agent app health status.
+func (c *Client) PostWorkspaceAgentAppHealth(ctx context.Context, req PostWorkspaceAppHealthsRequest) error {
+	res, err := c.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/app-health", req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return readBodyAsError(res)
+	}
+
+	return nil
+}
+
 func (c *Client) PostWorkspaceAgentVersion(ctx context.Context, version string) error {
-	// Phone home and tell the mothership what version we're on.
 	versionReq := PostWorkspaceAgentVersionRequest{Version: version}
 	res, err := c.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/version", versionReq)
 	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
 		return readBodyAsError(res)
 	}
-	// Discord the response
-	_, _ = io.Copy(io.Discard, res.Body)
-	_ = res.Body.Close()
 	return nil
 }
 
 // WorkspaceAgentReconnectingPTY spawns a PTY that reconnects using the token provided.
 // It communicates using `agent.ReconnectingPTYRequest` marshaled as JSON.
 // Responses are PTY output that can be rendered.
-func (c *Client) WorkspaceAgentReconnectingPTY(ctx context.Context, agentID, reconnect uuid.UUID, height, width int, command string) (net.Conn, error) {
-	serverURL, err := c.URL.Parse(fmt.Sprintf("/api/v2/workspaceagents/%s/pty?reconnect=%s&height=%d&width=%d&command=%s", agentID, reconnect, height, width, command))
+func (c *Client) WorkspaceAgentReconnectingPTY(ctx context.Context, agentID, reconnect uuid.UUID, height, width uint16, command string) (net.Conn, error) {
+	serverURL, err := c.URL.Parse(fmt.Sprintf("/api/v2/workspaceagents/%s/pty", agentID))
 	if err != nil {
 		return nil, xerrors.Errorf("parse url: %w", err)
 	}
+	q := serverURL.Query()
+	q.Set("reconnect", reconnect.String())
+	q.Set("height", strconv.Itoa(int(height)))
+	q.Set("width", strconv.Itoa(int(width)))
+	q.Set("command", command)
+	serverURL.RawQuery = q.Encode()
+
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, xerrors.Errorf("create cookie jar: %w", err)
 	}
 	jar.SetCookies(serverURL, []*http.Cookie{{
 		Name:  SessionTokenKey,
-		Value: c.SessionToken,
+		Value: c.SessionToken(),
 	}})
 	httpClient := &http.Client{
 		Jar: jar,
@@ -509,25 +539,63 @@ func (c *Client) WorkspaceAgentReconnectingPTY(ctx context.Context, agentID, rec
 	return websocket.NetConn(ctx, conn, websocket.MessageBinary), nil
 }
 
-func (c *Client) turnProxyDialer(ctx context.Context, httpClient *http.Client, path string) proxy.Dialer {
-	return turnconn.ProxyDialer(func() (net.Conn, error) {
-		turnURL, err := c.URL.Parse(path)
-		if err != nil {
-			return nil, xerrors.Errorf("parse url: %w", err)
-		}
-		conn, res, err := websocket.Dial(ctx, turnURL.String(), &websocket.DialOptions{
-			HTTPClient: httpClient,
-			// Need to disable compression to avoid a data-race.
-			CompressionMode: websocket.CompressionDisabled,
-		})
-		if err != nil {
-			if res == nil {
-				return nil, err
-			}
-			return nil, readBodyAsError(res)
-		}
-		return websocket.NetConn(ctx, conn, websocket.MessageBinary), nil
-	})
+// WorkspaceAgentListeningPorts returns a list of ports that are currently being
+// listened on inside the workspace agent's network namespace.
+func (c *Client) WorkspaceAgentListeningPorts(ctx context.Context, agentID uuid.UUID) (ListeningPortsResponse, error) {
+	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/workspaceagents/%s/listening-ports", agentID), nil)
+	if err != nil {
+		return ListeningPortsResponse{}, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return ListeningPortsResponse{}, readBodyAsError(res)
+	}
+	var listeningPorts ListeningPortsResponse
+	return listeningPorts, json.NewDecoder(res.Body).Decode(&listeningPorts)
+}
+
+// Stats records the Agent's network connection statistics for use in
+// user-facing metrics and debugging.
+// @typescript-ignore AgentStats
+type AgentStats struct {
+	// ConnsByProto is a count of connections by protocol.
+	ConnsByProto map[string]int64 `json:"conns_by_proto"`
+	// NumConns is the number of connections received by an agent.
+	NumConns int64 `json:"num_comms"`
+	// RxPackets is the number of received packets.
+	RxPackets int64 `json:"rx_packets"`
+	// RxBytes is the number of received bytes.
+	RxBytes int64 `json:"rx_bytes"`
+	// TxPackets is the number of transmitted bytes.
+	TxPackets int64 `json:"tx_packets"`
+	// TxBytes is the number of transmitted bytes.
+	TxBytes int64 `json:"tx_bytes"`
+}
+
+// @typescript-ignore AgentStatsResponse
+type AgentStatsResponse struct {
+	// ReportInterval is the duration after which the agent should send stats
+	// again.
+	ReportInterval time.Duration `json:"report_interval"`
+}
+
+func (c *Client) PostAgentStats(ctx context.Context, stats *AgentStats) (AgentStatsResponse, error) {
+	res, err := c.Request(ctx, http.MethodPost, "/api/v2/workspaceagents/me/report-stats", stats)
+	if err != nil {
+		return AgentStatsResponse{}, xerrors.Errorf("send request: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return AgentStatsResponse{}, readBodyAsError(res)
+	}
+
+	var interval AgentStatsResponse
+	err = json.NewDecoder(res.Body).Decode(&interval)
+	if err != nil {
+		return AgentStatsResponse{}, xerrors.Errorf("decode stats response: %w", err)
+	}
+
+	return interval, nil
 }
 
 // AgentReportStats begins a stat streaming connection with the Coder server.
@@ -535,81 +603,81 @@ func (c *Client) turnProxyDialer(ctx context.Context, httpClient *http.Client, p
 func (c *Client) AgentReportStats(
 	ctx context.Context,
 	log slog.Logger,
-	stats func() *agent.Stats,
+	getStats func() *AgentStats,
 ) (io.Closer, error) {
-	serverURL, err := c.URL.Parse("/api/v2/workspaceagents/me/report-stats")
-	if err != nil {
-		return nil, xerrors.Errorf("parse url: %w", err)
-	}
-
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, xerrors.Errorf("create cookie jar: %w", err)
-	}
-
-	jar.SetCookies(serverURL, []*http.Cookie{{
-		Name:  SessionTokenKey,
-		Value: c.SessionToken,
-	}})
-
-	httpClient := &http.Client{
-		Jar: jar,
-	}
-
-	doneCh := make(chan struct{})
 	ctx, cancel := context.WithCancel(ctx)
 
 	go func() {
-		defer close(doneCh)
+		// Immediately trigger a stats push to get the correct interval.
+		timer := time.NewTimer(time.Nanosecond)
+		defer timer.Stop()
 
-		// If the agent connection succeeds for a while, then fails, then succeeds
-		// for a while (etc.) the retry may hit the maximum. This is a normal
-		// case for long-running agents that experience coderd upgrades, so
-		// we use a short maximum retry limit.
-		for r := retry.New(time.Second, time.Minute); r.Wait(ctx); {
-			err = func() error {
-				conn, res, err := websocket.Dial(ctx, serverURL.String(), &websocket.DialOptions{
-					HTTPClient: httpClient,
-					// Need to disable compression to avoid a data-race.
-					CompressionMode: websocket.CompressionDisabled,
-				})
-				if err != nil {
-					if res == nil {
-						return err
-					}
-					return readBodyAsError(res)
-				}
-
-				for {
-					var req AgentStatsReportRequest
-					err := wsjson.Read(ctx, conn, &req)
-					if err != nil {
-						return err
-					}
-
-					s := stats()
-
-					resp := AgentStatsReportResponse{
-						NumConns: s.NumConns,
-						RxBytes:  s.RxBytes,
-						TxBytes:  s.TxBytes,
-					}
-
-					err = wsjson.Write(ctx, conn, resp)
-					if err != nil {
-						return err
-					}
-				}
-			}()
-			if err != nil && ctx.Err() == nil {
-				log.Error(ctx, "report stats", slog.Error(err))
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
 			}
+
+			var nextInterval time.Duration
+			for r := retry.New(100*time.Millisecond, time.Minute); r.Wait(ctx); {
+				resp, err := c.PostAgentStats(ctx, getStats())
+				if err != nil {
+					if !xerrors.Is(err, context.Canceled) {
+						log.Error(ctx, "report stats", slog.Error(err))
+					}
+					continue
+				}
+
+				nextInterval = resp.ReportInterval
+				break
+			}
+			timer.Reset(nextInterval)
 		}
 	}()
 
 	return closeFunc(func() error {
 		cancel()
-		<-doneCh
 		return nil
 	}), nil
+}
+
+// GitProvider is a constant that represents the
+// type of providers that are supported within Coder.
+// @typescript-ignore GitProvider
+type GitProvider string
+
+const (
+	GitProviderAzureDevops = "azure-devops"
+	GitProviderGitHub      = "github"
+	GitProviderGitLab      = "gitlab"
+	GitProviderBitBucket   = "bitbucket"
+)
+
+type WorkspaceAgentGitAuthResponse struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	URL      string `json:"url"`
+}
+
+// WorkspaceAgentGitAuth submits a URL to fetch a GIT_ASKPASS username
+// and password for.
+// nolint:revive
+func (c *Client) WorkspaceAgentGitAuth(ctx context.Context, gitURL string, listen bool) (WorkspaceAgentGitAuthResponse, error) {
+	reqURL := "/api/v2/workspaceagents/me/gitauth?url=" + url.QueryEscape(gitURL)
+	if listen {
+		reqURL += "&listen"
+	}
+	res, err := c.Request(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return WorkspaceAgentGitAuthResponse{}, xerrors.Errorf("execute request: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return WorkspaceAgentGitAuthResponse{}, readBodyAsError(res)
+	}
+
+	var authResp WorkspaceAgentGitAuthResponse
+	return authResp, json.NewDecoder(res.Body).Decode(&authResp)
 }

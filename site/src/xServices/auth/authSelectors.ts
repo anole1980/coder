@@ -1,13 +1,15 @@
-import { State } from "xstate"
-import { AuthContext, AuthEvent } from "./authXService"
+import { StateFrom } from "xstate"
+import { AuthContext, authMachine } from "./authXService"
 
-type AuthState = State<AuthContext, AuthEvent>
+type AuthState = StateFrom<typeof authMachine>
 
 export const selectOrgId = (state: AuthState): string | undefined => {
   return state.context.me?.organization_ids[0]
 }
 
-export const selectPermissions = (state: AuthState): AuthContext["permissions"] => {
+export const selectPermissions = (
+  state: AuthState,
+): AuthContext["permissions"] => {
   return state.context.permissions
 }
 

@@ -1,14 +1,21 @@
 import { ComponentMeta, Story } from "@storybook/react"
+import { createPaginationRef } from "components/PaginationWidget/utils"
 import dayjs from "dayjs"
 import { spawn } from "xstate"
-import { ProvisionerJobStatus, WorkspaceTransition } from "../../api/typesGenerated"
+import {
+  ProvisionerJobStatus,
+  WorkspaceTransition,
+} from "../../api/typesGenerated"
 import { MockWorkspace } from "../../testHelpers/entities"
 import { workspaceFilterQuery } from "../../util/filters"
 import {
   workspaceItemMachine,
   WorkspaceItemMachineRef,
 } from "../../xServices/workspaces/workspacesXService"
-import { WorkspacesPageView, WorkspacesPageViewProps } from "./WorkspacesPageView"
+import {
+  WorkspacesPageView,
+  WorkspacesPageViewProps,
+} from "./WorkspacesPageView"
 
 const createWorkspaceItemRef = (
   status: ProvisionerJobStatus,
@@ -51,9 +58,24 @@ const additionalWorkspaces: Record<string, WorkspaceItemMachineRef> = {
   succeededAndStop: createWorkspaceItemRef("succeeded", "stop"),
   runningAndDelete: createWorkspaceItemRef("running", "delete"),
   outdated: createWorkspaceItemRef("running", "delete", true),
-  active: createWorkspaceItemRef("running", undefined, true, dayjs().toString()),
-  today: createWorkspaceItemRef("running", undefined, true, dayjs().subtract(3, "hour").toString()),
-  old: createWorkspaceItemRef("running", undefined, true, dayjs().subtract(1, "week").toString()),
+  active: createWorkspaceItemRef(
+    "running",
+    undefined,
+    true,
+    dayjs().toString(),
+  ),
+  today: createWorkspaceItemRef(
+    "running",
+    undefined,
+    true,
+    dayjs().subtract(3, "hour").toString(),
+  ),
+  old: createWorkspaceItemRef(
+    "running",
+    undefined,
+    true,
+    dayjs().subtract(1, "week").toString(),
+  ),
   veryOld: createWorkspaceItemRef(
     "running",
     undefined,
@@ -66,28 +88,53 @@ export default {
   title: "pages/WorkspacesPageView",
   component: WorkspacesPageView,
   argTypes: {
+    paginationRef: {
+      defaultValue: createPaginationRef({ page: 1, limit: 25 }),
+    },
     workspaceRefs: {
-      options: [...Object.keys(workspaces), ...Object.keys(additionalWorkspaces)],
+      options: [
+        ...Object.keys(workspaces),
+        ...Object.keys(additionalWorkspaces),
+      ],
       mapping: { ...workspaces, ...additionalWorkspaces },
     },
   },
 } as ComponentMeta<typeof WorkspacesPageView>
 
-const Template: Story<WorkspacesPageViewProps> = (args) => <WorkspacesPageView {...args} />
+const Template: Story<WorkspacesPageViewProps> = (args) => (
+  <WorkspacesPageView {...args} />
+)
 
 export const AllStates = Template.bind({})
 AllStates.args = {
-  workspaceRefs: [...Object.values(workspaces), ...Object.values(additionalWorkspaces)],
+  workspaceRefs: [
+    ...Object.values(workspaces),
+    ...Object.values(additionalWorkspaces),
+  ],
+  count: 14,
+  isNonInitialPage: false,
 }
 
 export const OwnerHasNoWorkspaces = Template.bind({})
 OwnerHasNoWorkspaces.args = {
   workspaceRefs: [],
   filter: workspaceFilterQuery.me,
+  count: 0,
+  isNonInitialPage: false,
 }
 
 export const NoResults = Template.bind({})
 NoResults.args = {
   workspaceRefs: [],
   filter: "searchtearmwithnoresults",
+  count: 0,
+  isNonInitialPage: false,
+}
+
+export const EmptyPage = Template.bind({})
+EmptyPage.args = {
+  workspaceRefs: [],
+  filter: workspaceFilterQuery.me,
+  count: 0,
+  isNonInitialPage: true,
 }

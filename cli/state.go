@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,6 +16,9 @@ func state() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "state",
 		Short: "Manually manage Terraform state to fix broken workspaces",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
+		},
 	}
 	cmd.AddCommand(statePull(), statePush())
 	return cmd
@@ -97,7 +99,6 @@ func statePush() *cobra.Command {
 				return err
 			}
 
-			before := time.Now()
 			build, err = client.CreateWorkspaceBuild(cmd.Context(), workspace.ID, codersdk.CreateWorkspaceBuildRequest{
 				TemplateVersionID: build.TemplateVersionID,
 				Transition:        build.Transition,
@@ -106,7 +107,7 @@ func statePush() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return cliui.WorkspaceBuild(cmd.Context(), cmd.OutOrStderr(), client, build.ID, before)
+			return cliui.WorkspaceBuild(cmd.Context(), cmd.OutOrStderr(), client, build.ID)
 		},
 	}
 	cmd.Flags().IntVarP(&buildNumber, "build", "b", 0, "Specify a workspace build to target by name.")

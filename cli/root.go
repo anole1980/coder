@@ -4,10 +4,15 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
@@ -22,12 +27,14 @@ import (
 	"github.com/coder/coder/cli/cliflag"
 	"github.com/coder/coder/cli/cliui"
 	"github.com/coder/coder/cli/config"
+	"github.com/coder/coder/cli/deployment"
 	"github.com/coder/coder/coderd"
+	"github.com/coder/coder/coderd/gitauth"
 	"github.com/coder/coder/codersdk"
 )
 
 var (
-	caret = cliui.Styles.Prompt.String()
+	Caret = cliui.Styles.Prompt.String()
 
 	// Applied as annotations to workspace commands
 	// so they display in a separated "help" section.
@@ -41,7 +48,6 @@ const (
 	varToken            = "token"
 	varAgentToken       = "agent-token"
 	varAgentURL         = "agent-url"
-	varGlobalConfig     = "global-config"
 	varHeader           = "header"
 	varNoOpen           = "no-open"
 	varNoVersionCheck   = "no-version-warning"
@@ -52,11 +58,12 @@ const (
 
 	envNoVersionCheck   = "CODER_NO_VERSION_WARNING"
 	envNoFeatureWarning = "CODER_NO_FEATURE_WARNING"
+	envSessionToken     = "CODER_SESSION_TOKEN"
+	envURL              = "CODER_URL"
 )
 
 var (
 	errUnauthenticated = xerrors.New(notLoggedInMessage)
-	envSessionToken    = "CODER_SESSION_TOKEN"
 )
 
 func init() {
@@ -65,6 +72,7 @@ func init() {
 }
 
 func Core() []*cobra.Command {
+	// Please re-sort this list alphabetically if you change it!
 	return []*cobra.Command{
 		configSSH(),
 		create(),
@@ -77,79 +85,62 @@ func Core() []*cobra.Command {
 		parameters(),
 		portForward(),
 		publickey(),
+		rename(),
 		resetPassword(),
+		scaletest(),
 		schedules(),
 		show(),
-		ssh(),
 		speedtest(),
+		ssh(),
 		start(),
 		state(),
 		stop(),
-		rename(),
+		restart(),
 		templates(),
+		tokens(),
 		update(),
 		users(),
 		versionCmd(),
+		vscodeSSH(),
 		workspaceAgent(),
-		features(),
 	}
 }
 
 func AGPL() []*cobra.Command {
-	all := append(Core(), Server(coderd.New))
+	all := append(Core(), Server(deployment.NewViper(), func(_ context.Context, o *coderd.Options) (*coderd.API, io.Closer, error) {
+		api := coderd.New(o)
+		return api, api, nil
+	}))
 	return all
 }
 
 func Root(subcommands []*cobra.Command) *cobra.Command {
+	// The GIT_ASKPASS environment variable must point at
+	// a binary with no arguments. To prevent writing
+	// cross-platform scripts to invoke the Coder binary
+	// with a `gitaskpass` subcommand, we override the entrypoint
+	// to check if the command was invoked.
+	isGitAskpass := false
+
+	fmtLong := `Coder %s — A tool for provisioning self-hosted development environments with Terraform.
+`
 	cmd := &cobra.Command{
 		Use:           "coder",
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		Long: `Coder — A tool for provisioning self-hosted development environments.
-`,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			if cliflag.IsSetBool(cmd, varNoVersionCheck) &&
-				cliflag.IsSetBool(cmd, varNoFeatureWarning) {
-				return
+		Long:          fmt.Sprintf(fmtLong, buildinfo.Version()),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if gitauth.CheckCommand(args, os.Environ()) {
+				isGitAskpass = true
+				return nil
 			}
-
-			// login handles checking the versions itself since it has a handle
-			// to an unauthenticated client.
-			//
-			// server is skipped for obvious reasons.
-			//
-			// agent is skipped because these checks use the global coder config
-			// and not the agent URL and token from the environment.
-			//
-			// gitssh is skipped because it's usually not called by users
-			// directly.
-			if cmd.Name() == "login" || cmd.Name() == "server" || cmd.Name() == "agent" || cmd.Name() == "gitssh" {
-				return
+			return cobra.NoArgs(cmd, args)
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if isGitAskpass {
+				return gitAskpass().RunE(cmd, args)
 			}
-
-			client, err := CreateClient(cmd)
-			// If we are unable to create a client, presumably the subcommand will fail as well
-			// so we can bail out here.
-			if err != nil {
-				return
-			}
-
-			err = checkVersions(cmd, client)
-			if err != nil {
-				// Just log the error here. We never want to fail a command
-				// due to a pre-run.
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-					cliui.Styles.Warn.Render("check versions error: %s"), err)
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr())
-			}
-
-			err = checkWarnings(cmd, client)
-			if err != nil {
-				// Same as above
-				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-					cliui.Styles.Warn.Render("check entitlement warnings error: %s"), err)
-				_, _ = fmt.Fprintln(cmd.ErrOrStderr())
-			}
+			return cmd.Help()
 		},
 		Example: formatExamples(
 			example{
@@ -164,26 +155,56 @@ func Root(subcommands []*cobra.Command) *cobra.Command {
 	}
 
 	cmd.AddCommand(subcommands...)
+	fixUnknownSubcommandError(cmd.Commands())
 
 	cmd.SetUsageTemplate(usageTemplate())
 
-	cmd.PersistentFlags().String(varURL, "", "Specify the URL to your deployment.")
+	cliflag.String(cmd.PersistentFlags(), varURL, "", envURL, "", "URL to a deployment.")
 	cliflag.Bool(cmd.PersistentFlags(), varNoVersionCheck, "", envNoVersionCheck, false, "Suppress warning when client and server versions do not match.")
 	cliflag.Bool(cmd.PersistentFlags(), varNoFeatureWarning, "", envNoFeatureWarning, false, "Suppress warnings about unlicensed features.")
 	cliflag.String(cmd.PersistentFlags(), varToken, "", envSessionToken, "", fmt.Sprintf("Specify an authentication token. For security reasons setting %s is preferred.", envSessionToken))
-	cliflag.String(cmd.PersistentFlags(), varAgentToken, "", "CODER_AGENT_TOKEN", "", "Specify an agent authentication token.")
+	cliflag.String(cmd.PersistentFlags(), varAgentToken, "", "CODER_AGENT_TOKEN", "", "An agent authentication token.")
 	_ = cmd.PersistentFlags().MarkHidden(varAgentToken)
-	cliflag.String(cmd.PersistentFlags(), varAgentURL, "", "CODER_AGENT_URL", "", "Specify the URL for an agent to access your deployment.")
+	cliflag.String(cmd.PersistentFlags(), varAgentURL, "", "CODER_AGENT_URL", "", "URL for an agent to access your deployment.")
 	_ = cmd.PersistentFlags().MarkHidden(varAgentURL)
-	cliflag.String(cmd.PersistentFlags(), varGlobalConfig, "", "CODER_CONFIG_DIR", configdir.LocalConfig("coderv2"), "Specify the path to the global `coder` config directory.")
+	cliflag.String(cmd.PersistentFlags(), config.FlagName, "", "CODER_CONFIG_DIR", configdir.LocalConfig("coderv2"), "Path to the global `coder` config directory.")
 	cliflag.StringArray(cmd.PersistentFlags(), varHeader, "", "CODER_HEADER", []string{}, "HTTP headers added to all requests. Provide as \"Key=Value\"")
 	cmd.PersistentFlags().Bool(varForceTty, false, "Force the `coder` command to run as if connected to a TTY.")
 	_ = cmd.PersistentFlags().MarkHidden(varForceTty)
 	cmd.PersistentFlags().Bool(varNoOpen, false, "Block automatically opening URLs in the browser.")
 	_ = cmd.PersistentFlags().MarkHidden(varNoOpen)
-	cliflag.Bool(cmd.PersistentFlags(), varVerbose, "v", "CODER_VERBOSE", false, "Enable verbose output")
+	cliflag.Bool(cmd.PersistentFlags(), varVerbose, "v", "CODER_VERBOSE", false, "Enable verbose output.")
 
 	return cmd
+}
+
+// fixUnknownSubcommandError modifies the provided commands so that the
+// ones with subcommands output the correct error message when an
+// unknown subcommand is invoked.
+//
+// Example:
+//
+//	unknown command "bad" for "coder templates"
+func fixUnknownSubcommandError(commands []*cobra.Command) {
+	for _, sc := range commands {
+		if sc.HasSubCommands() {
+			if sc.Run == nil && sc.RunE == nil {
+				if sc.Args != nil {
+					// In case the developer does not know about this
+					// behavior in Cobra they must verify correct
+					// behavior. For instance, settings Args to
+					// `cobra.ExactArgs(0)` will not give the same
+					// message as `cobra.NoArgs`. Likewise, omitting the
+					// run function will not give the wanted error.
+					panic("developer error: subcommand has subcommands and Args but no Run or RunE")
+				}
+				sc.Args = cobra.NoArgs
+				sc.Run = func(*cobra.Command, []string) {}
+			}
+
+			fixUnknownSubcommandError(sc.Commands())
+		}
+	}
 }
 
 // versionCmd prints the coder version
@@ -193,12 +214,22 @@ func versionCmd() *cobra.Command {
 		Short: "Show coder version",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var str strings.Builder
-			_, _ = str.WriteString(fmt.Sprintf("Coder %s", buildinfo.Version()))
+			_, _ = str.WriteString("Coder ")
+			if buildinfo.IsAGPL() {
+				_, _ = str.WriteString("(AGPL) ")
+			}
+			_, _ = str.WriteString(buildinfo.Version())
 			buildTime, valid := buildinfo.Time()
 			if valid {
 				_, _ = str.WriteString(" " + buildTime.Format(time.UnixDate))
 			}
-			_, _ = str.WriteString("\r\n" + buildinfo.ExternalURL() + "\r\n")
+			_, _ = str.WriteString("\r\n" + buildinfo.ExternalURL() + "\r\n\r\n")
+
+			if buildinfo.IsSlim() {
+				_, _ = str.WriteString(fmt.Sprintf("Slim build of Coder, does not support the %s subcommand.\n", cliui.Styles.Code.Render("server")))
+			} else {
+				_, _ = str.WriteString(fmt.Sprintf("Full build of Coder, supports the %s subcommand.\n", cliui.Styles.Code.Render("server")))
+			}
 
 			_, _ = fmt.Fprint(cmd.OutOrStdout(), str.String())
 			return nil
@@ -244,7 +275,38 @@ func CreateClient(cmd *cobra.Command) (*codersdk.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	client.SessionToken = token
+	client.SetSessionToken(token)
+
+	// We send these requests in parallel to minimize latency.
+	var (
+		versionErr = make(chan error)
+		warningErr = make(chan error)
+	)
+	go func() {
+		versionErr <- checkVersions(cmd, client)
+		close(versionErr)
+	}()
+
+	go func() {
+		warningErr <- checkWarnings(cmd, client)
+		close(warningErr)
+	}()
+
+	if err = <-versionErr; err != nil {
+		// Just log the error here. We never want to fail a command
+		// due to a pre-run.
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			cliui.Styles.Warn.Render("check versions error: %s"), err)
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+	}
+
+	if err = <-warningErr; err != nil {
+		// Same as above
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			cliui.Styles.Warn.Render("check entitlement warnings error: %s"), err)
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+	}
+
 	return client, nil
 }
 
@@ -285,12 +347,12 @@ func createAgentClient(cmd *cobra.Command) (*codersdk.Client, error) {
 		return nil, err
 	}
 	client := codersdk.New(serverURL)
-	client.SessionToken = token
+	client.SetSessionToken(token)
 	return client, nil
 }
 
-// currentOrganization returns the currently active organization for the authenticated user.
-func currentOrganization(cmd *cobra.Command, client *codersdk.Client) (codersdk.Organization, error) {
+// CurrentOrganization returns the currently active organization for the authenticated user.
+func CurrentOrganization(cmd *cobra.Command, client *codersdk.Client) (codersdk.Organization, error) {
 	orgs, err := client.OrganizationsByUser(cmd.Context(), codersdk.Me)
 	if err != nil {
 		return codersdk.Organization{}, nil
@@ -323,7 +385,7 @@ func namedWorkspace(cmd *cobra.Command, client *codersdk.Client, identifier stri
 
 // createConfig consumes the global configuration flag to produce a config root.
 func createConfig(cmd *cobra.Command) config.Root {
-	globalRoot, err := cmd.Flags().GetString(varGlobalConfig)
+	globalRoot, err := cmd.Flags().GetString(config.FlagName)
 	if err != nil {
 		panic(err)
 	}
@@ -352,6 +414,17 @@ func isTTY(cmd *cobra.Command) bool {
 // This accepts a reader to work with Cobra's "OutOrStdout"
 // function for simple testing.
 func isTTYOut(cmd *cobra.Command) bool {
+	return isTTYWriter(cmd, cmd.OutOrStdout)
+}
+
+// isTTYErr returns whether the passed reader is a TTY or not.
+// This accepts a reader to work with Cobra's "ErrOrStderr"
+// function for simple testing.
+func isTTYErr(cmd *cobra.Command) bool {
+	return isTTYWriter(cmd, cmd.ErrOrStderr)
+}
+
+func isTTYWriter(cmd *cobra.Command, writer func() io.Writer) bool {
 	// If the `--force-tty` command is available, and set,
 	// assume we're in a tty. This is primarily for cases on Windows
 	// where we may not be able to reliably detect this automatically (ie, tests)
@@ -359,7 +432,7 @@ func isTTYOut(cmd *cobra.Command) bool {
 	if forceTty && err == nil {
 		return true
 	}
-	file, ok := cmd.OutOrStdout().(*os.File)
+	file, ok := writer().(*os.File)
 	if !ok {
 		return false
 	}
@@ -526,12 +599,17 @@ func checkVersions(cmd *cobra.Command, client *codersdk.Client) error {
 	}
 
 	fmtWarningText := `version mismatch: client %s, server %s
-download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'
 `
+	// Our installation script doesn't work on Windows, so instead we direct the user
+	// to the GitHub release page to download the latest installer.
+	if runtime.GOOS == "windows" {
+		fmtWarningText += `download the server version from: https://github.com/coder/coder/releases/v%s`
+	} else {
+		fmtWarningText += `download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'`
+	}
 
 	if !buildinfo.VersionsMatch(clientVersion, info.Version) {
 		warn := cliui.Styles.Warn.Copy().Align(lipgloss.Left)
-		// Trim the leading 'v', our install.sh script does not handle this case well.
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), warn.Render(fmtWarningText), clientVersion, info.Version, strings.TrimPrefix(info.CanonicalVersion(), "v"))
 		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
 	}
@@ -548,13 +626,11 @@ func checkWarnings(cmd *cobra.Command, client *codersdk.Client) error {
 	defer cancel()
 
 	entitlements, err := client.Entitlements(ctx)
-	if err != nil {
-		return xerrors.Errorf("get entitlements to show warnings: %w", err)
+	if err == nil {
+		for _, w := range entitlements.Warnings {
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), cliui.Styles.Warn.Render(w))
+		}
 	}
-	for _, w := range entitlements.Warnings {
-		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), cliui.Styles.Warn.Render(w))
-	}
-
 	return nil
 }
 
@@ -568,4 +644,94 @@ func (h *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.Header.Add(k, v)
 	}
 	return h.transport.RoundTrip(req)
+}
+
+// dumpHandler provides a custom SIGQUIT and SIGTRAP handler that dumps the
+// stacktrace of all goroutines to stderr and a well-known file in the home
+// directory. This is useful for debugging deadlock issues that may occur in
+// production in workspaces, since the default Go runtime will only dump to
+// stderr (which is often difficult/impossible to read in a workspace).
+//
+// SIGQUITs will still cause the program to exit (similarly to the default Go
+// runtime behavior).
+//
+// A SIGQUIT handler will not be registered if GOTRACEBACK=crash.
+//
+// On Windows this immediately returns.
+func dumpHandler(ctx context.Context) {
+	if runtime.GOOS == "windows" {
+		// free up the goroutine since it'll be permanently blocked anyways
+		return
+	}
+
+	listenSignals := []os.Signal{syscall.SIGTRAP}
+	if os.Getenv("GOTRACEBACK") != "crash" {
+		listenSignals = append(listenSignals, syscall.SIGQUIT)
+	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, listenSignals...)
+	defer signal.Stop(sigs)
+
+	for {
+		sigStr := ""
+		select {
+		case <-ctx.Done():
+			return
+		case sig := <-sigs:
+			switch sig {
+			case syscall.SIGQUIT:
+				sigStr = "SIGQUIT"
+			case syscall.SIGTRAP:
+				sigStr = "SIGTRAP"
+			}
+		}
+
+		// Start with a 1MB buffer and keep doubling it until we can fit the
+		// entire stacktrace, stopping early once we reach 64MB.
+		buf := make([]byte, 1_000_000)
+		stacklen := 0
+		for {
+			stacklen = runtime.Stack(buf, true)
+			if stacklen < len(buf) {
+				break
+			}
+			if 2*len(buf) > 64_000_000 {
+				// Write a message to the end of the buffer saying that it was
+				// truncated.
+				const truncatedMsg = "\n\n\nstack trace truncated due to size\n"
+				copy(buf[len(buf)-len(truncatedMsg):], truncatedMsg)
+				break
+			}
+			buf = make([]byte, 2*len(buf))
+		}
+
+		_, _ = fmt.Fprintf(os.Stderr, "%s:\n%s\n", sigStr, buf[:stacklen])
+
+		// Write to a well-known file.
+		dir, err := os.UserHomeDir()
+		if err != nil {
+			dir = os.TempDir()
+		}
+		fpath := filepath.Join(dir, fmt.Sprintf("coder-agent-%s.dump", time.Now().Format("2006-01-02T15:04:05.000Z")))
+		_, _ = fmt.Fprintf(os.Stderr, "writing dump to %q\n", fpath)
+
+		f, err := os.Create(fpath)
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "failed to open dump file: %v\n", err.Error())
+			goto done
+		}
+		_, err = f.Write(buf[:stacklen])
+		_ = f.Close()
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "failed to write dump file: %v\n", err.Error())
+			goto done
+		}
+
+	done:
+		if sigStr == "SIGQUIT" {
+			//nolint:revive
+			os.Exit(1)
+		}
+	}
 }

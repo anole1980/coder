@@ -22,14 +22,6 @@ const (
 	UserStatusSuspended UserStatus = "suspended"
 )
 
-type LoginType string
-
-const (
-	LoginTypePassword LoginType = "password"
-	LoginTypeGithub   LoginType = "github"
-	LoginTypeOIDC     LoginType = "oidc"
-)
-
 type UsersRequest struct {
 	Search string `json:"search,omitempty" typescript:"-"`
 	// Filter users by status.
@@ -43,45 +35,41 @@ type UsersRequest struct {
 
 // User represents a user in Coder.
 type User struct {
-	ID              uuid.UUID   `json:"id" validate:"required" table:"id"`
-	Username        string      `json:"username" validate:"required" table:"username"`
-	Email           string      `json:"email" validate:"required" table:"email"`
-	CreatedAt       time.Time   `json:"created_at" validate:"required" table:"created at"`
-	Status          UserStatus  `json:"status" table:"status"`
-	OrganizationIDs []uuid.UUID `json:"organization_ids"`
+	ID         uuid.UUID `json:"id" validate:"required" table:"id" format:"uuid"`
+	Username   string    `json:"username" validate:"required" table:"username"`
+	Email      string    `json:"email" validate:"required" table:"email" format:"email"`
+	CreatedAt  time.Time `json:"created_at" validate:"required" table:"created at" format:"date-time"`
+	LastSeenAt time.Time `json:"last_seen_at" format:"date-time"`
+
+	Status          UserStatus  `json:"status" table:"status" enums:"active,suspended"`
+	OrganizationIDs []uuid.UUID `json:"organization_ids" format:"uuid"`
 	Roles           []Role      `json:"roles"`
-	AvatarURL       string      `json:"avatar_url"`
+	AvatarURL       string      `json:"avatar_url" format:"uri"`
 }
 
-type APIKey struct {
-	ID              string    `json:"id" validate:"required"`
-	UserID          uuid.UUID `json:"user_id" validate:"required"`
-	LastUsed        time.Time `json:"last_used" validate:"required"`
-	ExpiresAt       time.Time `json:"expires_at" validate:"required"`
-	CreatedAt       time.Time `json:"created_at" validate:"required"`
-	UpdatedAt       time.Time `json:"updated_at" validate:"required"`
-	LoginType       LoginType `json:"login_type" validate:"required"`
-	LifetimeSeconds int64     `json:"lifetime_seconds" validate:"required"`
+type GetUsersResponse struct {
+	Users []User `json:"users"`
+	Count int    `json:"count"`
 }
 
 type CreateFirstUserRequest struct {
-	Email            string `json:"email" validate:"required,email"`
-	Username         string `json:"username" validate:"required,username"`
-	Password         string `json:"password" validate:"required"`
-	OrganizationName string `json:"organization" validate:"required,username"`
+	Email    string `json:"email" validate:"required,email"`
+	Username string `json:"username" validate:"required,username"`
+	Password string `json:"password" validate:"required"`
+	Trial    bool   `json:"trial"`
 }
 
 // CreateFirstUserResponse contains IDs for newly created user info.
 type CreateFirstUserResponse struct {
-	UserID         uuid.UUID `json:"user_id"`
-	OrganizationID uuid.UUID `json:"organization_id"`
+	UserID         uuid.UUID `json:"user_id" format:"uuid"`
+	OrganizationID uuid.UUID `json:"organization_id" format:"uuid"`
 }
 
 type CreateUserRequest struct {
-	Email          string    `json:"email" validate:"required,email"`
+	Email          string    `json:"email" validate:"required,email" format:"email"`
 	Username       string    `json:"username" validate:"required,username"`
 	Password       string    `json:"password" validate:"required"`
-	OrganizationID uuid.UUID `json:"organization_id" validate:"required"`
+	OrganizationID uuid.UUID `json:"organization_id" validate:"required" format:"uuid"`
 }
 
 type UpdateUserProfileRequest struct {
@@ -102,70 +90,15 @@ type UserRoles struct {
 	OrganizationRoles map[uuid.UUID][]string `json:"organization_roles"`
 }
 
-type UserAuthorizationResponse map[string]bool
-
-// UserAuthorizationRequest is a structure instead of a map because
-// go-playground/validate can only validate structs. If you attempt to pass
-// a map into 'httpapi.Read', you will get an invalid type error.
-type UserAuthorizationRequest struct {
-	// Checks is a map keyed with an arbitrary string to a permission check.
-	// The key can be any string that is helpful to the caller, and allows
-	// multiple permission checks to be run in a single request.
-	// The key ensures that each permission check has the same key in the
-	// response.
-	Checks map[string]UserAuthorization `json:"checks"`
-}
-
-// UserAuthorization is used to check if a user can do a given action
-// to a given set of objects.
-type UserAuthorization struct {
-	// Object can represent a "set" of objects, such as:
-	//	- All workspaces in an organization
-	//	- All workspaces owned by me
-	//	- All workspaces across the entire product
-	// When defining an object, use the most specific language when possible to
-	// produce the smallest set. Meaning to set as many fields on 'Object' as
-	// you can. Example, if you want to check if you can update all workspaces
-	// owned by 'me', try to also add an 'OrganizationID' to the settings.
-	// Omitting the 'OrganizationID' could produce the incorrect value, as
-	// workspaces have both `user` and `organization` owners.
-	Object UserAuthorizationObject `json:"object"`
-	// Action can be 'create', 'read', 'update', or 'delete'
-	Action string `json:"action"`
-}
-
-type UserAuthorizationObject struct {
-	// ResourceType is the name of the resource.
-	// './coderd/rbac/object.go' has the list of valid resource types.
-	ResourceType string `json:"resource_type"`
-	// OwnerID (optional) is a user_id. It adds the set constraint to all resources owned
-	// by a given user.
-	OwnerID string `json:"owner_id,omitempty"`
-	// OrganizationID (optional) is an organization_id. It adds the set constraint to
-	// all resources owned by a given organization.
-	OrganizationID string `json:"organization_id,omitempty"`
-	// ResourceID (optional) reduces the set to a singular resource. This assigns
-	// a resource ID to the resource type, eg: a single workspace.
-	// The rbac library will not fetch the resource from the database, so if you
-	// are using this option, you should also set the 'OwnerID' and 'OrganizationID'
-	// if possible. Be as specific as possible using all the fields relevant.
-	ResourceID string `json:"resource_id,omitempty"`
-}
-
 // LoginWithPasswordRequest enables callers to authenticate with email and password.
 type LoginWithPasswordRequest struct {
-	Email    string `json:"email" validate:"required,email"`
+	Email    string `json:"email" validate:"required,email" format:"email"`
 	Password string `json:"password" validate:"required"`
 }
 
 // LoginWithPasswordResponse contains a session token for the newly authenticated user.
 type LoginWithPasswordResponse struct {
 	SessionToken string `json:"session_token" validate:"required"`
-}
-
-// GenerateAPIKeyResponse contains an API key for a user.
-type GenerateAPIKeyResponse struct {
-	Key string `json:"key"`
 }
 
 type CreateOrganizationRequest struct {
@@ -334,33 +267,6 @@ func (c *Client) GetUserRoles(ctx context.Context, user string) (UserRoles, erro
 	return roles, json.NewDecoder(res.Body).Decode(&roles)
 }
 
-// CreateAPIKey generates an API key for the user ID provided.
-func (c *Client) CreateAPIKey(ctx context.Context, user string) (*GenerateAPIKeyResponse, error) {
-	res, err := c.Request(ctx, http.MethodPost, fmt.Sprintf("/api/v2/users/%s/keys", user), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode > http.StatusCreated {
-		return nil, readBodyAsError(res)
-	}
-	apiKey := &GenerateAPIKeyResponse{}
-	return apiKey, json.NewDecoder(res.Body).Decode(apiKey)
-}
-
-func (c *Client) GetAPIKey(ctx context.Context, user string, id string) (*APIKey, error) {
-	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/users/%s/keys/%s", user, id), nil)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode > http.StatusCreated {
-		return nil, readBodyAsError(res)
-	}
-	apiKey := &APIKey{}
-	return apiKey, json.NewDecoder(res.Body).Decode(apiKey)
-}
-
 // LoginWithPassword creates a session token authenticating with an email and password.
 // Call `SetSessionToken()` to apply the newly acquired token to the client.
 func (c *Client) LoginWithPassword(ctx context.Context, req LoginWithPasswordRequest) (LoginWithPasswordResponse, error) {
@@ -409,7 +315,7 @@ func (c *Client) User(ctx context.Context, userIdent string) (User, error) {
 
 // Users returns all users according to the request parameters. If no parameters are set,
 // the default behavior is to return all users in a single page.
-func (c *Client) Users(ctx context.Context, req UsersRequest) ([]User, error) {
+func (c *Client) Users(ctx context.Context, req UsersRequest) (GetUsersResponse, error) {
 	res, err := c.Request(ctx, http.MethodGet, "/api/v2/users", nil,
 		req.Pagination.asRequestOption(),
 		func(r *http.Request) {
@@ -432,16 +338,16 @@ func (c *Client) Users(ctx context.Context, req UsersRequest) ([]User, error) {
 		},
 	)
 	if err != nil {
-		return []User{}, err
+		return GetUsersResponse{}, err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return []User{}, readBodyAsError(res)
+		return GetUsersResponse{}, readBodyAsError(res)
 	}
 
-	var users []User
-	return users, json.NewDecoder(res.Body).Decode(&users)
+	var usersRes GetUsersResponse
+	return usersRes, json.NewDecoder(res.Body).Decode(&usersRes)
 }
 
 // OrganizationsByUser returns all organizations the user is a member of.

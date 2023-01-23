@@ -13,75 +13,72 @@ Coder with Docker has the following advantages:
 
 ## Instructions
 
-1.  [Install and launch Coder](../install)
+1. Run Coder with Docker.
 
-    You will specify `CODER_ACCESS_URL=http://localhost:7080` since we're using
-    local Docker workspaces exclusively. `CODER_ACCESS_URL` is the external URL
-    to access Coder. The rest of the Docker quickstart guide will assume that
-    this is your Access URL.
+   ```console
+   export CODER_DATA=$HOME/.config/coderv2-docker
+   export DOCKER_GROUP=$(getent group docker | cut -d: -f3)
+   mkdir -p $CODER_DATA
+   docker run --rm -it \
+       -v $CODER_DATA:/home/coder/.config \
+       -v /var/run/docker.sock:/var/run/docker.sock \
+       --group-add $DOCKER_GROUP \
+       ghcr.io/coder/coder:latest
+   ```
 
-    You will also specify `CODER_ADDRESS=0.0.0.0:7080` which is the address to
-    serve the API and dashboard.
+   > This will use Coder's tunnel and built-in database. See our [Docker documentation](../install/docker.md) for other configuration options such as running on localhost, using docker-compose, and external PostgreSQL.
 
-    ```bash
-    coder server --address $CODER_ADDRESS --access-url $CODER_ACCESS_URL
-    ```
+1. In new terminal, [install Coder](../install/) in order to connect to your deployment through the CLI.
 
-1.  Run `coder login http://localhost:7080` in a new terminal and follow the
-    interactive instructions to create your user.
+   ```console
+   curl -L https://coder.com/install.sh | sh
+   ```
 
-1.  Pull the example template:
+1. Run `coder login <access url>` and follow the
+   interactive instructions to create your user.
 
-    ```bash
-    echo "docker" | coder templates init
-    cd docker
-    # You should see a `main.tf` file in this directory
-    ```
+1. Pull the "Docker" example template using the interactive `coder templates init`:
 
-1.  Open up `main.tf` in your preferred editor to edit the images
+   ```console
+   coder templates init
+   cd docker
+   ```
 
-    You can skip this step if you're fine with our default, generic OS images.
+1. Push up the template with `coder templates create`
 
-    Search for the following section in `main.tf`:
+1. Open the dashboard in your browser to create your
+   first workspace:
 
-    ```hcl
-    ...
-    variable "docker_image" {
-     description = "Which Docker image would you like to use for your workspace?"
-     # The codercom/enterprise-* images are only built for amd64
-     default = "codercom/enterprise-base:ubuntu"
-     validation {
-         condition     = contains(["codercom/enterprise-base:ubuntu", "codercom/enterprise-node:ubuntu",
-                                 "codercom/enterprise-intellij:ubuntu", "codercom/enterprise-golang:ubuntu"], var.docker_image)
-         error_message = "Invalid Docker image!"
-     }
-    }
-    ...
-    ```
+   <img src="../images/quickstart/docker/login.png">
 
-    And edit the strings in `condition = contains([...])` and `default = ...`
-    with your preferred images.
+   Then navigate to `Templates > docker > Create workspace`
 
-1.  Push up the template to Coder with `coder templates create`
-1.  Open the dashboard in your browser (http://localhost:7080) to create your
-    first workspace:
+   <img src="../images/quickstart/docker/create-workspace.png">
 
-    <img src="../images/quickstart/docker/login.png">
+   Now wait a few moments for the workspace to build... After the first build,
+   the image is cached and subsequent builds will take a few seconds.
 
-    Then navigate to `Templates > docker > Create workspace`
+1. Your workspace is ready to go!
 
-    <img src="../images/quickstart/docker/create-workspace.png">
+   <img src="../images/quickstart/docker/ides.png">
 
-    Now wait a few moments for the workspace to build... After the first build
-    the image is cached and subsequent builds will take a few seconds.
+   Open up a web application or [SSH in](../ides.md#ssh-configuration).
 
-1.  All done!
+1. If you want to modify the Docker image or template, edit the files in the
+   previously created `./docker` directory, then run `coder templates push`.
 
-    <img src="../images/quickstart/docker/ides.png">
+## Troubleshooting
 
-    Open up a web application or [SSH in](../ides.md#ssh-configuration).
+### Docker-based workspace is stuck in "Connecting..."
+
+Ensure you have an externally-reachable `CODER_ACCESS_URL` set. See [troubleshooting templates](../templates.md#creating-and-troubleshooting-templates) for more steps.
+
+### Permission denied while trying to connect to the Docker daemon socket
+
+See Docker's official documentation to [Manage Docker as a non-root user](https://docs.docker.com/engine/install/linux-postinstall/#manage-docker-as-a-non-root-user).
 
 ## Next Steps
 
+- [Port-forward](../networking/port-forwarding.md)
 - [Learn more about template configuration](../templates.md)
 - [Configure more IDEs](../ides/web-ides.md)

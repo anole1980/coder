@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,8 +19,10 @@ const (
 	ResourceTypeTemplateVersion ResourceType = "template_version"
 	ResourceTypeUser            ResourceType = "user"
 	ResourceTypeWorkspace       ResourceType = "workspace"
+	ResourceTypeWorkspaceBuild  ResourceType = "workspace_build"
 	ResourceTypeGitSSHKey       ResourceType = "git_ssh_key"
 	ResourceTypeAPIKey          ResourceType = "api_key"
+	ResourceTypeGroup           ResourceType = "group"
 )
 
 func (r ResourceType) FriendlyString() string {
@@ -34,10 +37,16 @@ func (r ResourceType) FriendlyString() string {
 		return "user"
 	case ResourceTypeWorkspace:
 		return "workspace"
+	case ResourceTypeWorkspaceBuild:
+		// workspace builds have a unique friendly string
+		// see coderd/audit.go:298 for explanation
+		return "workspace"
 	case ResourceTypeGitSSHKey:
 		return "git ssh key"
 	case ResourceTypeAPIKey:
 		return "api key"
+	case ResourceTypeGroup:
+		return "group"
 	default:
 		return "unknown"
 	}
@@ -49,6 +58,8 @@ const (
 	AuditActionCreate AuditAction = "create"
 	AuditActionWrite  AuditAction = "write"
 	AuditActionDelete AuditAction = "delete"
+	AuditActionStart  AuditAction = "start"
+	AuditActionStop   AuditAction = "stop"
 )
 
 func (a AuditAction) FriendlyString() string {
@@ -59,6 +70,10 @@ func (a AuditAction) FriendlyString() string {
 		return "updated"
 	case AuditActionDelete:
 		return "deleted"
+	case AuditActionStart:
+		return "started"
+	case AuditActionStop:
+		return "stopped"
 	default:
 		return "unknown"
 	}
@@ -73,14 +88,14 @@ type AuditDiffField struct {
 }
 
 type AuditLog struct {
-	ID             uuid.UUID    `json:"id"`
-	RequestID      uuid.UUID    `json:"request_id"`
-	Time           time.Time    `json:"time"`
-	OrganizationID uuid.UUID    `json:"organization_id"`
+	ID             uuid.UUID    `json:"id" format:"uuid"`
+	RequestID      uuid.UUID    `json:"request_id" format:"uuid"`
+	Time           time.Time    `json:"time" format:"date-time"`
+	OrganizationID uuid.UUID    `json:"organization_id" format:"uuid"`
 	IP             netip.Addr   `json:"ip"`
 	UserAgent      string       `json:"user_agent"`
 	ResourceType   ResourceType `json:"resource_type"`
-	ResourceID     uuid.UUID    `json:"resource_id"`
+	ResourceID     uuid.UUID    `json:"resource_id" format:"uuid"`
 	// ResourceTarget is the name of the resource.
 	ResourceTarget   string          `json:"resource_target"`
 	ResourceIcon     string          `json:"resource_icon"`
@@ -89,21 +104,40 @@ type AuditLog struct {
 	StatusCode       int32           `json:"status_code"`
 	AdditionalFields json.RawMessage `json:"additional_fields"`
 	Description      string          `json:"description"`
+	ResourceLink     string          `json:"resource_link"`
+	IsDeleted        bool            `json:"is_deleted"`
 
 	User *User `json:"user"`
 }
 
-type AuditLogResponse struct {
-	AuditLogs []AuditLog `json:"audit_logs"`
+type AuditLogsRequest struct {
+	SearchQuery string `json:"q,omitempty"`
+	Pagination
 }
 
-type AuditLogCountResponse struct {
-	Count int64 `json:"count"`
+type AuditLogResponse struct {
+	AuditLogs []AuditLog `json:"audit_logs"`
+	Count     int64      `json:"count"`
+}
+
+type CreateTestAuditLogRequest struct {
+	Action       AuditAction  `json:"action,omitempty" enums:"create,write,delete,start,stop"`
+	ResourceType ResourceType `json:"resource_type,omitempty" enums:"organization,template,template_version,user,workspace,workspace_build,git_ssh_key,api_key,group"`
+	ResourceID   uuid.UUID    `json:"resource_id,omitempty" format:"uuid"`
+	Time         time.Time    `json:"time,omitempty" format:"date-time"`
 }
 
 // AuditLogs retrieves audit logs from the given page.
-func (c *Client) AuditLogs(ctx context.Context, page Pagination) (AuditLogResponse, error) {
-	res, err := c.Request(ctx, http.MethodGet, "/api/v2/audit", nil, page.asRequestOption())
+func (c *Client) AuditLogs(ctx context.Context, req AuditLogsRequest) (AuditLogResponse, error) {
+	res, err := c.Request(ctx, http.MethodGet, "/api/v2/audit", nil, req.Pagination.asRequestOption(), func(r *http.Request) {
+		q := r.URL.Query()
+		var params []string
+		if req.SearchQuery != "" {
+			params = append(params, req.SearchQuery)
+		}
+		q.Set("q", strings.Join(params, " "))
+		r.URL.RawQuery = q.Encode()
+	})
 	if err != nil {
 		return AuditLogResponse{}, err
 	}
@@ -122,29 +156,8 @@ func (c *Client) AuditLogs(ctx context.Context, page Pagination) (AuditLogRespon
 	return logRes, nil
 }
 
-// AuditLogCount returns the count of all audit logs in the product.
-func (c *Client) AuditLogCount(ctx context.Context) (AuditLogCountResponse, error) {
-	res, err := c.Request(ctx, http.MethodGet, "/api/v2/audit/count", nil)
-	if err != nil {
-		return AuditLogCountResponse{}, err
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		return AuditLogCountResponse{}, readBodyAsError(res)
-	}
-
-	var logRes AuditLogCountResponse
-	err = json.NewDecoder(res.Body).Decode(&logRes)
-	if err != nil {
-		return AuditLogCountResponse{}, err
-	}
-
-	return logRes, nil
-}
-
-func (c *Client) CreateTestAuditLog(ctx context.Context) error {
-	res, err := c.Request(ctx, http.MethodPost, "/api/v2/audit/testgenerate", nil)
+func (c *Client) CreateTestAuditLog(ctx context.Context, req CreateTestAuditLogRequest) error {
+	res, err := c.Request(ctx, http.MethodPost, "/api/v2/audit/testgenerate", req)
 	if err != nil {
 		return err
 	}

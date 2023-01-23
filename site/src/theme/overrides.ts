@@ -1,9 +1,17 @@
-import { lighten, Theme } from "@material-ui/core/styles"
+import { lighten, Theme, StyleRules } from "@material-ui/core/styles"
 import { Overrides } from "@material-ui/core/styles/overrides"
+import { SkeletonClassKey } from "@material-ui/lab"
 import { colors } from "./colors"
-import { borderRadius } from "./constants"
+import { borderRadius, borderRadiusSm } from "./constants"
 
-export const getOverrides = ({ palette, breakpoints }: Theme): Overrides => {
+type ExtendedOverrides = Overrides & {
+  MuiSkeleton: Partial<StyleRules<SkeletonClassKey>>
+}
+
+export const getOverrides = ({
+  palette,
+  breakpoints,
+}: Theme): ExtendedOverrides => {
   return {
     MuiCssBaseline: {
       "@global": {
@@ -11,7 +19,6 @@ export const getOverrides = ({ palette, breakpoints }: Theme): Overrides => {
           backgroundImage: `linear-gradient(to right bottom, ${palette.background.default}, ${colors.gray[17]})`,
           backgroundRepeat: "no-repeat",
           backgroundAttachment: "fixed",
-          letterSpacing: "-0.015em",
         },
         ":root": {
           colorScheme: palette.type,
@@ -37,6 +44,10 @@ export const getOverrides = ({ palette, breakpoints }: Theme): Overrides => {
         textTransform: "none",
         letterSpacing: "none",
         border: `1px solid ${palette.divider}`,
+
+        "&:focus-visible": {
+          outline: `2px solid ${palette.primary.dark}`,
+        },
       },
       contained: {
         boxShadow: "none",
@@ -55,15 +66,21 @@ export const getOverrides = ({ palette, breakpoints }: Theme): Overrides => {
         },
       },
       sizeSmall: {
-        padding: `0 12px`,
+        padding: `0 16px`,
         fontSize: 14,
         minHeight: 36,
+        borderRadius: borderRadiusSm,
       },
       iconSizeSmall: {
-        width: 16,
-        height: 16,
+        width: 14,
+        height: 14,
         marginLeft: "0 !important",
-        marginRight: 12,
+        marginRight: 8,
+
+        "& svg:not(.MuiCircularProgress-svg)": {
+          width: 14,
+          height: 14,
+        },
       },
       outlined: {
         border: `1px solid ${palette.divider}`,
@@ -79,11 +96,6 @@ export const getOverrides = ({ palette, breakpoints }: Theme): Overrides => {
           width: 20,
           height: 20,
         },
-      },
-    },
-    MuiTableHead: {
-      root: {
-        display: "table-header-group",
       },
     },
     MuiTableContainer: {
@@ -119,6 +131,7 @@ export const getOverrides = ({ palette, breakpoints }: Theme): Overrides => {
         fontSize: 14,
         color: palette.text.secondary,
         fontWeight: 600,
+        background: palette.background.paperLight,
       },
       root: {
         fontSize: 16,
@@ -183,6 +196,16 @@ export const getOverrides = ({ palette, breakpoints }: Theme): Overrides => {
 
       marginDense: {
         marginTop: 8,
+      },
+    },
+    MuiSkeleton: {
+      root: {
+        backgroundColor: palette.divider,
+      },
+    },
+    MuiLinearProgress: {
+      root: {
+        borderRadius: 999,
       },
     },
   }

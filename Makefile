@@ -37,6 +37,25 @@ GOARCH       := $(shell go env GOARCH)
 GOOS_BIN_EXT := $(if $(filter windows, $(GOOS)),.exe,)
 VERSION      := $(shell ./scripts/version.sh)
 
+# Use the highest ZSTD compression level in CI.
+ifdef CI
+ZSTDFLAGS := -22 --ultra
+else
+ZSTDFLAGS := -6
+endif
+
+# Common paths to exclude from find commands, this rule is written so
+# that it can be it can be used in a chain of AND statements (meaning
+# you can simply write `find . $(FIND_EXCLUSIONS) -name thing-i-want`).
+# Note, all find statements should be written with `.` or `./path` as
+# the search path so that these exclusions match.
+FIND_EXCLUSIONS= \
+	-not \( \( -path '*/.git/*' -o -path './build/*' -o -path './vendor/*' -o -path './.coderv2/*' -o -path '*/node_modules/*' -o -path './site/out/*' \) -prune \)
+# Source files used for make targets, evaluated on use.
+GO_SRC_FILES = $(shell find . $(FIND_EXCLUSIONS) -type f -name '*.go')
+# All the shell files in the repo, excluding ignored files.
+SHELL_SRC_FILES = $(shell find . $(FIND_EXCLUSIONS) -type f -name '*.sh')
+
 # All ${OS}_${ARCH} combos we build for. Windows binaries have the .exe suffix.
 OS_ARCHES := \
 	linux_amd64 linux_arm64 linux_armv7 \
@@ -73,6 +92,19 @@ CODER_FAT_NOVERSION_BINARIES      := $(addprefix build/coder_,$(OS_ARCHES))
 CODER_ALL_NOVERSION_IMAGES        := $(foreach arch, $(DOCKER_ARCHES), build/coder_linux_$(arch).tag) build/coder_linux.tag
 CODER_ALL_NOVERSION_IMAGES_PUSHED := $(addprefix push/, $(CODER_ALL_NOVERSION_IMAGES))
 
+# If callers are only building Docker images and not the packages and archives,
+# we can skip those prerequisites as they are not actually required and only
+# specified to avoid concurrent write failures.
+ifdef DOCKER_IMAGE_NO_PREREQUISITES
+CODER_ARCH_IMAGE_PREREQUISITES :=
+else
+CODER_ARCH_IMAGE_PREREQUISITES := \
+	build/coder_$(VERSION)_%.apk \
+	build/coder_$(VERSION)_%.deb \
+	build/coder_$(VERSION)_%.rpm \
+	build/coder_$(VERSION)_%.tar.gz
+endif
+
 
 clean:
 	rm -rf build site/out
@@ -89,30 +121,32 @@ build-fat build-full build: $(CODER_FAT_BINARIES)
 release: $(CODER_FAT_BINARIES) $(CODER_ALL_ARCHIVES) $(CODER_ALL_PACKAGES) $(CODER_ARCH_IMAGES) build/coder_helm_$(VERSION).tgz
 .PHONY: release
 
-build/coder-slim_$(VERSION)_checksums.sha1 site/out/bin/coder.sha1: $(CODER_SLIM_BINARIES)
+build/coder-slim_$(VERSION)_checksums.sha1: site/out/bin/coder.sha1
+	cp "$<" "$@"
+
+site/out/bin/coder.sha1: $(CODER_SLIM_BINARIES)
 	pushd ./site/out/bin
 		openssl dgst -r -sha1 coder-* | tee coder.sha1
 	popd
-
-	cp "site/out/bin/coder.sha1" "build/coder-slim_$(VERSION)_checksums.sha1"
 
 build/coder-slim_$(VERSION).tar: build/coder-slim_$(VERSION)_checksums.sha1 $(CODER_SLIM_BINARIES)
 	pushd ./site/out/bin
 		tar cf "../../../build/$(@F)" coder-*
 	popd
 
-build/coder-slim_$(VERSION).tar.zst site/out/bin/coder.tar.zst: build/coder-slim_$(VERSION).tar
-	zstd -6 \
+	# delete the uncompressed binaries from the embedded dir
+	rm -f site/out/bin/coder-*
+
+site/out/bin/coder.tar.zst: build/coder-slim_$(VERSION).tar.zst
+	cp "$<" "$@"
+
+build/coder-slim_$(VERSION).tar.zst: build/coder-slim_$(VERSION).tar
+	zstd $(ZSTDFLAGS) \
 		--force \
-		--ultra \
 		--long \
 		--no-progress \
 		-o "build/coder-slim_$(VERSION).tar.zst" \
 		"build/coder-slim_$(VERSION).tar"
-
-	cp "build/coder-slim_$(VERSION).tar.zst" "site/out/bin/coder.tar.zst"
-	# delete the uncompressed binaries from the embedded dir
-	rm site/out/bin/coder-*
 
 # Redirect from version-less targets to the versioned ones. There is a similar
 # target for slim binaries below.
@@ -165,7 +199,7 @@ endef
 # You should probably use the non-version targets above instead if you're
 # calling this manually.
 $(CODER_ALL_BINARIES): go.mod go.sum \
-	$(shell find . -not -path './vendor/*' -type f -name '*.go') \
+	$(GO_SRC_FILES) \
 	$(shell find ./examples/templates)
 
 	$(get-mode-os-arch-ext)
@@ -246,6 +280,13 @@ $(CODER_ALL_PACKAGES): $(CODER_PACKAGE_DEPS)
 		--output "$@" \
 		"build/coder_$(VERSION)_$${os}_$${arch}"
 
+# This task builds a Windows amd64 installer. Depends on makensis.
+build/coder_$(VERSION)_windows_amd64_installer.exe: build/coder_$(VERSION)_windows_amd64.exe
+	./scripts/build_windows_installer.sh \
+		--version "$(VERSION)" \
+		--output "$@" \
+		"$<"
+
 # Redirect from version-less Docker image targets to the versioned ones.
 #
 # Called like this:
@@ -268,13 +309,7 @@ $(CODER_ALL_NOVERSION_IMAGES_PUSHED): push/build/coder_%: push/build/coder_$(VER
 #
 # Images need to run after the archives and packages are built, otherwise they
 # cause errors like "file changed as we read it".
-$(CODER_ARCH_IMAGES): build/coder_$(VERSION)_%.tag: \
-	build/coder_$(VERSION)_% \
-	build/coder_$(VERSION)_%.apk \
-	build/coder_$(VERSION)_%.deb \
-	build/coder_$(VERSION)_%.rpm \
-	build/coder_$(VERSION)_%.tar.gz
-
+$(CODER_ARCH_IMAGES): build/coder_$(VERSION)_%.tag: build/coder_$(VERSION)_% $(CODER_ARCH_IMAGE_PREREQUISITES)
 	$(get-mode-os-arch-ext)
 
 	image_tag="$$(./scripts/image_tag.sh --arch "$$arch" --version "$(VERSION)")"
@@ -320,10 +355,9 @@ build/coder_helm_$(VERSION).tgz:
 		--version "$(VERSION)" \
 		--output "$@"
 
-site/out/index.html: $(shell find ./site -not -path './site/node_modules/*' -type f -name '*.tsx') $(shell find ./site -not -path './site/node_modules/*' -type f -name '*.ts') site/package.json
+site/out/index.html: site/package.json $(shell find ./site $(FIND_EXCLUSIONS) -type f \( -name '*.ts' -o -name '*.tsx' \))
 	./scripts/yarn_install.sh
 	cd site
-	yarn typegen
 	yarn build
 
 install: build/coder_$(VERSION)_$(GOOS)_$(GOARCH)$(GOOS_BIN_EXT)
@@ -352,13 +386,13 @@ fmt/terraform: $(wildcard *.tf)
 	terraform fmt -recursive
 .PHONY: fmt/terraform
 
-fmt/shfmt: $(shell shfmt -f .)
+fmt/shfmt: $(SHELL_SRC_FILES)
 	echo "--- shfmt"
 # Only do diff check in CI, errors on diff.
 ifdef CI
-	shfmt -d $(shell shfmt -f .)
+	shfmt -d $(SHELL_SRC_FILES)
 else
-	shfmt -w $(shell shfmt -f .)
+	shfmt -w $(SHELL_SRC_FILES)
 endif
 .PHONY: fmt/shfmt
 
@@ -371,25 +405,44 @@ lint/go:
 .PHONY: lint/go
 
 # Use shfmt to determine the shell files, takes editorconfig into consideration.
-lint/shellcheck: $(shell shfmt -f .)
+lint/shellcheck: $(SHELL_SRC_FILES)
 	echo "--- shellcheck"
-	shellcheck --external-sources $(shell shfmt -f .)
+	shellcheck --external-sources $(SHELL_SRC_FILES)
 .PHONY: lint/shellcheck
 
 # all gen targets should be added here and to gen/mark-fresh
 gen: \
 	coderd/database/dump.sql \
 	coderd/database/querier.go \
-	peerbroker/proto/peerbroker.pb.go \
 	provisionersdk/proto/provisioner.pb.go \
 	provisionerd/proto/provisionerd.pb.go \
-	site/src/api/typesGenerated.ts
+	site/src/api/typesGenerated.ts \
+	docs/admin/prometheus.md \
+	coderd/apidoc/swagger.json \
+	.prettierignore.include \
+	.prettierignore \
+	site/.prettierrc.yaml \
+	site/.prettierignore \
+	site/.eslintignore
 .PHONY: gen
 
 # Mark all generated files as fresh so make thinks they're up-to-date. This is
 # used during releases so we don't run generation scripts.
 gen/mark-fresh:
-	files="coderd/database/dump.sql coderd/database/querier.go peerbroker/proto/peerbroker.pb.go provisionersdk/proto/provisioner.pb.go provisionerd/proto/provisionerd.pb.go site/src/api/typesGenerated.ts"
+	files="\
+		coderd/database/dump.sql \
+		coderd/database/querier.go \
+		provisionersdk/proto/provisioner.pb.go \
+		provisionerd/proto/provisionerd.pb.go \
+		site/src/api/typesGenerated.ts \
+		docs/admin/prometheus.md \
+		coderd/apidoc/swagger.json \
+		.prettierignore.include \
+		.prettierignore \
+		site/.prettierrc.yaml \
+		site/.prettierignore \
+		site/.eslintignore \
+	"
 	for file in $$files; do
 		echo "$$file"
 		if [ ! -f "$$file" ]; then
@@ -405,19 +458,11 @@ gen/mark-fresh:
 # Runs migrations to output a dump of the database schema after migrations are
 # applied.
 coderd/database/dump.sql: coderd/database/gen/dump/main.go $(wildcard coderd/database/migrations/*.sql)
-	go run coderd/database/gen/dump/main.go
+	go run ./coderd/database/gen/dump/main.go
 
 # Generates Go code for querying the database.
 coderd/database/querier.go: coderd/database/sqlc.yaml coderd/database/dump.sql $(wildcard coderd/database/queries/*.sql) coderd/database/gen/enum/main.go
 	./coderd/database/generate.sh
-
-peerbroker/proto/peerbroker.pb.go: peerbroker/proto/peerbroker.proto
-	protoc \
-		--go_out=. \
-		--go_opt=paths=source_relative \
-		--go-drpc_out=. \
-		--go-drpc_opt=paths=source_relative \
-		./peerbroker/proto/peerbroker.proto
 
 provisionersdk/proto/provisioner.pb.go: provisionersdk/proto/provisioner.proto
 	protoc \
@@ -435,10 +480,86 @@ provisionerd/proto/provisionerd.pb.go: provisionerd/proto/provisionerd.proto
 		--go-drpc_opt=paths=source_relative \
 		./provisionerd/proto/provisionerd.proto
 
-site/src/api/typesGenerated.ts: scripts/apitypings/main.go $(shell find codersdk -type f -name '*.go')
+site/src/api/typesGenerated.ts: scripts/apitypings/main.go $(shell find ./codersdk $(FIND_EXCLUSIONS) -type f -name '*.go')
 	go run scripts/apitypings/main.go > site/src/api/typesGenerated.ts
 	cd site
 	yarn run format:types
+
+docs/admin/prometheus.md: scripts/metricsdocgen/main.go scripts/metricsdocgen/metrics
+	go run scripts/metricsdocgen/main.go
+	cd site
+	yarn run format:write:only ../docs/admin/prometheus.md
+
+coderd/apidoc/swagger.json: $(shell find ./scripts/apidocgen $(FIND_EXCLUSIONS) -type f) $(wildcard coderd/*.go) $(wildcard enterprise/coderd/*.go) $(wildcard codersdk/*.go) .swaggo docs/manifest.json
+	./scripts/apidocgen/generate.sh
+	yarn run --cwd=site format:write:only ../docs/api ../docs/manifest.json ../coderd/apidoc/swagger.json
+
+update-golden-files: cli/testdata/.gen-golden
+.PHONY: update-golden-files
+
+cli/testdata/.gen-golden: $(wildcard cli/testdata/*.golden) $(GO_SRC_FILES)
+	go test ./cli -run=TestCommandHelp -update
+	touch "$@"
+
+# Generate a prettierrc for the site package that uses relative paths for
+# overrides. This allows us to share the same prettier config between the
+# site and the root of the repo.
+site/.prettierrc.yaml: .prettierrc.yaml
+	. ./scripts/lib.sh
+	dependencies yq
+
+	echo "# Code generated by Makefile (../$<). DO NOT EDIT." > "$@"
+	echo "" >> "$@"
+
+	# Replace all listed override files with relative paths inside site/.
+	# - ./ -> ../
+	# - ./site -> ./
+	yq \
+		'.overrides[].files |= map(. | sub("^./"; "") | sub("^"; "../") | sub("../site/"; "./"))' \
+		"$<" >> "$@"
+
+# Combine .gitignore with .prettierignore.include to generate .prettierignore.
+.prettierignore: .gitignore .prettierignore.include
+	echo "# Code generated by Makefile ($^). DO NOT EDIT." > "$@"
+	echo "" >> "$@"
+	for f in $^; do
+		echo "# $${f}:" >> "$@"
+		cat "$$f" >> "$@"
+	done
+
+# Generate ignore files based on gitignore into the site directory. We turn all
+# rules into relative paths for the `site/` directory (where applicable),
+# following the pattern format defined by git:
+# https://git-scm.com/docs/gitignore#_pattern_format
+#
+# This is done for compatibility reasons, see:
+# https://github.com/prettier/prettier/issues/8048
+# https://github.com/prettier/prettier/issues/8506
+# https://github.com/prettier/prettier/issues/8679
+site/.eslintignore site/.prettierignore: .prettierignore Makefile
+	rm -f "$@"
+	touch "$@"
+	# Skip generated by header, inherit `.prettierignore` header as-is.
+	while read -r rule; do
+		# Remove leading ! if present to simplify rule, added back at the end.
+		tmp="$${rule#!}"
+		ignore="$${rule%"$$tmp"}"
+		rule="$$tmp"
+		case "$$rule" in
+			# Comments or empty lines (include).
+			\#*|'') ;;
+			# Generic rules (include).
+			\*\**) ;;
+			# Site prefixed rules (include).
+			site/*) rule="$${rule#site/}";;
+			./site/*) rule="$${rule#./site/}";;
+			# Rules that are non-generic and don't start with site (rewrite).
+			/*) rule=.."$$rule";;
+			*/?*) rule=../"$$rule";;
+			*) ;;
+		esac
+		echo "$${ignore}$${rule}" >> "$@"
+	done < "$<"
 
 test: test-clean
 	gotestsum -- -v -short ./...
@@ -447,8 +568,13 @@ test: test-clean
 # When updating -timeout for this test, keep in sync with
 # test-go-postgres (.github/workflows/coder.yaml).
 test-postgres: test-clean test-postgres-docker
-	DB=ci DB_FROM=$(shell go run scripts/migrate-ci/main.go) gotestsum --junitfile="gotests.xml" --packages="./..." -- \
+	# The postgres test is prone to failure, so we limit parallelism for
+	# more consistent execution.
+	DB=ci DB_FROM=$(shell go run scripts/migrate-ci/main.go) gotestsum \
+		--junitfile="gotests.xml" \
+		--packages="./..." -- \
 		-covermode=atomic -coverprofile="gotests.coverage" -timeout=20m \
+		-parallel=4 \
 		-coverpkg=./... \
 		-count=1 -race -failfast
 .PHONY: test-postgres

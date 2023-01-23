@@ -14,7 +14,7 @@ func start() *cobra.Command {
 	cmd := &cobra.Command{
 		Annotations: workspaceCommand,
 		Use:         "start <workspace>",
-		Short:       "Build a workspace with the start state",
+		Short:       "Start a workspace",
 		Args:        cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := CreateClient(cmd)
@@ -25,7 +25,6 @@ func start() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			before := time.Now()
 			build, err := client.CreateWorkspaceBuild(cmd.Context(), workspace.ID, codersdk.CreateWorkspaceBuildRequest{
 				Transition: codersdk.WorkspaceTransitionStart,
 			})
@@ -33,7 +32,7 @@ func start() *cobra.Command {
 				return err
 			}
 
-			err = cliui.WorkspaceBuild(cmd.Context(), cmd.OutOrStdout(), client, build.ID, before)
+			err = cliui.WorkspaceBuild(cmd.Context(), cmd.OutOrStdout(), client, build.ID)
 			if err != nil {
 				return err
 			}

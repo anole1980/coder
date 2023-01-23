@@ -1,94 +1,112 @@
-import { useMachine, useSelector } from "@xstate/react"
+import { makeStyles } from "@material-ui/core/styles"
+import { useMachine } from "@xstate/react"
+import { AlertBanner } from "components/AlertBanner/AlertBanner"
+import { ConfirmDialog } from "components/Dialogs/ConfirmDialog/ConfirmDialog"
+import { Loader } from "components/Loader/Loader"
+import { Margins } from "components/Margins/Margins"
+import dayjs from "dayjs"
 import { scheduleToAutoStart } from "pages/WorkspaceSchedulePage/schedule"
 import { ttlMsToAutoStop } from "pages/WorkspaceSchedulePage/ttl"
-import React, { useContext, useEffect, useState } from "react"
+import { useEffect, FC } from "react"
+import { useTranslation } from "react-i18next"
 import { Navigate, useNavigate, useParams } from "react-router-dom"
+import { scheduleChanged } from "util/schedule"
 import * as TypesGen from "../../api/typesGenerated"
-import { ErrorSummary } from "../../components/ErrorSummary/ErrorSummary"
-import { FullScreenLoader } from "../../components/Loader/FullScreenLoader"
 import { WorkspaceScheduleForm } from "../../components/WorkspaceScheduleForm/WorkspaceScheduleForm"
 import { firstOrItem } from "../../util/array"
-import { selectUser } from "../../xServices/auth/authSelectors"
-import { XServiceContext } from "../../xServices/StateContext"
 import { workspaceSchedule } from "../../xServices/workspaceSchedule/workspaceScheduleXService"
-import { formValuesToAutoStartRequest, formValuesToTTLRequest } from "./formToRequest"
+import {
+  formValuesToAutoStartRequest,
+  formValuesToTTLRequest,
+} from "./formToRequest"
 
-const Language = {
-  forbiddenError: "You don't have permissions to update the schedule for this workspace.",
-  getWorkspaceError: "Failed to fetch workspace.",
-  checkPermissionsError: "Failed to fetch permissions.",
-}
+const getAutoStart = (workspace?: TypesGen.Workspace) =>
+  scheduleToAutoStart(workspace?.autostart_schedule)
+const getAutoStop = (workspace?: TypesGen.Workspace) =>
+  ttlMsToAutoStop(workspace?.ttl_ms)
 
-export const WorkspaceSchedulePage: React.FC = () => {
-  const { username: usernameQueryParam, workspace: workspaceQueryParam } = useParams()
+const useStyles = makeStyles((theme) => ({
+  topMargin: {
+    marginTop: `${theme.spacing(3)}px`,
+  },
+}))
+
+export const WorkspaceSchedulePage: FC = () => {
+  const { t } = useTranslation("workspaceSchedulePage")
+  const styles = useStyles()
+  const { username: usernameQueryParam, workspace: workspaceQueryParam } =
+    useParams()
   const navigate = useNavigate()
   const username = firstOrItem(usernameQueryParam, null)
   const workspaceName = firstOrItem(workspaceQueryParam, null)
-
-  const xServices = useContext(XServiceContext)
-  const me = useSelector(xServices.authXService, selectUser)
-
-  const [scheduleState, scheduleSend] = useMachine(workspaceSchedule, {
-    context: {
-      userId: me?.id,
-    },
-  })
-  const { checkPermissionsError, submitScheduleError, getWorkspaceError, permissions, workspace } =
-    scheduleState.context
+  const [scheduleState, scheduleSend] = useMachine(workspaceSchedule)
+  const {
+    checkPermissionsError,
+    submitScheduleError,
+    getWorkspaceError,
+    getTemplateError,
+    permissions,
+    workspace,
+    template,
+  } = scheduleState.context
 
   // Get workspace on mount and whenever the args for getting a workspace change.
   // scheduleSend should not change.
   useEffect(() => {
-    username && workspaceName && scheduleSend({ type: "GET_WORKSPACE", username, workspaceName })
+    username &&
+      workspaceName &&
+      scheduleSend({ type: "GET_WORKSPACE", username, workspaceName })
   }, [username, workspaceName, scheduleSend])
-
-  const getAutoStart = (workspace?: TypesGen.Workspace) =>
-    scheduleToAutoStart(workspace?.autostart_schedule)
-  const getAutoStop = (workspace?: TypesGen.Workspace) => ttlMsToAutoStop(workspace?.ttl_ms)
-
-  const [autoStart, setAutoStart] = useState(getAutoStart(workspace))
-  const [autoStop, setAutoStop] = useState(getAutoStop(workspace))
-
-  useEffect(() => {
-    setAutoStart(getAutoStart(workspace))
-    setAutoStop(getAutoStop(workspace))
-  }, [workspace])
 
   if (!username || !workspaceName) {
     return <Navigate to="/workspaces" />
   }
 
-  if (
-    scheduleState.matches("idle") ||
-    scheduleState.matches("gettingWorkspace") ||
-    scheduleState.matches("gettingPermissions") ||
-    !workspace
-  ) {
-    return <FullScreenLoader />
+  if (scheduleState.hasTag("loading") || !template) {
+    return <Loader />
   }
 
   if (scheduleState.matches("error")) {
     return (
-      <ErrorSummary
-        error={getWorkspaceError || checkPermissionsError}
-        defaultMessage={
-          getWorkspaceError ? Language.getWorkspaceError : Language.checkPermissionsError
-        }
-        retry={() => scheduleSend({ type: "GET_WORKSPACE", username, workspaceName })}
-      />
+      <Margins>
+        <div className={styles.topMargin}>
+          <AlertBanner
+            severity="error"
+            error={
+              getWorkspaceError || checkPermissionsError || getTemplateError
+            }
+            retry={() =>
+              scheduleSend({ type: "GET_WORKSPACE", username, workspaceName })
+            }
+          />
+        </div>
+      </Margins>
     )
   }
 
   if (!permissions?.updateWorkspace) {
-    return <ErrorSummary error={Error(Language.forbiddenError)} />
+    return (
+      <Margins>
+        <div className={styles.topMargin}>
+          <AlertBanner severity="error" error={Error(t("forbiddenError"))} />
+        </div>
+      </Margins>
+    )
   }
 
-  if (scheduleState.matches("presentForm") || scheduleState.matches("submittingSchedule")) {
+  if (
+    scheduleState.matches("presentForm") ||
+    scheduleState.matches("submittingSchedule")
+  ) {
     return (
       <WorkspaceScheduleForm
         submitScheduleError={submitScheduleError}
-        initialValues={{ ...autoStart, ...autoStop }}
+        initialValues={{
+          ...getAutoStart(workspace),
+          ...getAutoStop(workspace),
+        }}
         isLoading={scheduleState.tags.has("loading")}
+        defaultTTL={dayjs.duration(template.default_ttl_ms, "ms").asHours()}
         onCancel={() => {
           navigate(`/@${username}/${workspaceName}`)
         }}
@@ -97,13 +115,34 @@ export const WorkspaceSchedulePage: React.FC = () => {
             type: "SUBMIT_SCHEDULE",
             autoStart: formValuesToAutoStartRequest(values),
             ttl: formValuesToTTLRequest(values),
+            autoStartChanged: scheduleChanged(getAutoStart(workspace), values),
+            autoStopChanged: scheduleChanged(getAutoStop(workspace), values),
           })
         }}
       />
     )
   }
 
-  if (scheduleState.matches("submitSuccess")) {
+  if (scheduleState.matches("showingRestartDialog")) {
+    return (
+      <ConfirmDialog
+        open
+        title={t("dialogTitle")}
+        description={t("dialogDescription")}
+        confirmText={t("restart")}
+        cancelText={t("applyLater")}
+        hideCancel={false}
+        onConfirm={() => {
+          scheduleSend("RESTART_WORKSPACE")
+        }}
+        onClose={() => {
+          scheduleSend("APPLY_LATER")
+        }}
+      />
+    )
+  }
+
+  if (scheduleState.matches("done")) {
     return <Navigate to={`/@${username}/${workspaceName}`} />
   }
 
@@ -111,3 +150,5 @@ export const WorkspaceSchedulePage: React.FC = () => {
   console.error("WorkspaceSchedulePage: unknown state :: ", scheduleState)
   return <Navigate to="/" />
 }
+
+export default WorkspaceSchedulePage
