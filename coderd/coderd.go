@@ -103,6 +103,7 @@ type Options struct {
 	OIDCConfig                     *OIDCConfig
 	PrometheusRegistry             *prometheus.Registry
 	SecureAuthCookie               bool
+	StrictTransportSecurityCfg     httpmw.HSTSConfig
 	SSHKeygenAlgorithm             gitsshkey.Algorithm
 	Telemetry                      telemetry.Reporter
 	TracerProvider                 trace.TracerProvider
@@ -115,6 +116,7 @@ type Options struct {
 	DERPServer         *derp.Server
 	DERPMap            *tailcfg.DERPMap
 	SwaggerEndpoint    bool
+	SetUserGroups      func(ctx context.Context, tx database.Store, userID uuid.UUID, groupNames []string) error
 
 	// APIRateLimit is the minutely throughput rate limit per user or ip.
 	// Setting a rate limit <0 will disable the rate limiter across the entire
@@ -153,6 +155,14 @@ type Options struct {
 func New(options *Options) *API {
 	if options == nil {
 		options = &Options{}
+	}
+	experiments := initExperiments(options.Logger, options.DeploymentConfig.Experiments.Value, options.DeploymentConfig.Experimental.Value)
+	// TODO: remove this once we promote authz_querier out of experiments.
+	if experiments.Enabled(codersdk.ExperimentAuthzQuerier) {
+		panic("Coming soon!")
+		// if _, ok := (options.Database).(*authzquery.AuthzQuerier); !ok {
+		// 	options.Database = authzquery.NewAuthzQuerier(options.Database, options.Authorizer)
+		// }
 	}
 	if options.AppHostname != "" && options.AppHostnameRegex == nil || options.AppHostname == "" && options.AppHostnameRegex != nil {
 		panic("coderd: both AppHostname and AppHostnameRegex must be set or unset")
@@ -194,6 +204,9 @@ func New(options *Options) *API {
 	if options.Auditor == nil {
 		options.Auditor = audit.NewNop()
 	}
+	if options.SetUserGroups == nil {
+		options.SetUserGroups = func(context.Context, database.Store, uuid.UUID, []string) error { return nil }
+	}
 
 	siteCacheDir := options.CacheDir
 	if siteCacheDir != "" {
@@ -210,19 +223,29 @@ func New(options *Options) *API {
 		options.MetricsCacheRefreshInterval,
 	)
 
+	staticHandler := site.Handler(site.FS(), binFS, binHashes)
+	// Static file handler must be wrapped with HSTS handler if the
+	// StrictTransportSecurityAge is set. We only need to set this header on
+	// static files since it only affects browsers.
+	staticHandler = httpmw.HSTS(staticHandler, options.StrictTransportSecurityCfg)
+
 	r := chi.NewRouter()
+	ctx, cancel := context.WithCancel(context.Background())
 	api := &API{
+		ctx:    ctx,
+		cancel: cancel,
+
 		ID:          uuid.New(),
 		Options:     options,
 		RootHandler: r,
-		siteHandler: site.Handler(site.FS(), binFS, binHashes),
+		siteHandler: staticHandler,
 		HTTPAuth: &HTTPAuthorizer{
 			Authorizer: options.Authorizer,
 			Logger:     options.Logger,
 		},
 		metricsCache: metricsCache,
 		Auditor:      atomic.Pointer[audit.Auditor]{},
-		Experiments:  initExperiments(options.Logger, options.DeploymentConfig.Experiments.Value, options.DeploymentConfig.Experimental.Value),
+		Experiments:  experiments,
 	}
 	if options.UpdateCheckOptions != nil {
 		api.updateChecker = updatecheck.New(
@@ -240,17 +263,19 @@ func New(options *Options) *API {
 	}
 
 	apiKeyMiddleware := httpmw.ExtractAPIKey(httpmw.ExtractAPIKeyConfig{
-		DB:              options.Database,
-		OAuth2Configs:   oauthConfigs,
-		RedirectToLogin: false,
-		Optional:        false,
+		DB:                          options.Database,
+		OAuth2Configs:               oauthConfigs,
+		RedirectToLogin:             false,
+		DisableSessionExpiryRefresh: options.DeploymentConfig.DisableSessionExpiryRefresh.Value,
+		Optional:                    false,
 	})
 	// Same as above but it redirects to the login page.
 	apiKeyMiddlewareRedirect := httpmw.ExtractAPIKey(httpmw.ExtractAPIKeyConfig{
-		DB:              options.Database,
-		OAuth2Configs:   oauthConfigs,
-		RedirectToLogin: true,
-		Optional:        false,
+		DB:                          options.Database,
+		OAuth2Configs:               oauthConfigs,
+		RedirectToLogin:             true,
+		DisableSessionExpiryRefresh: options.DeploymentConfig.DisableSessionExpiryRefresh.Value,
+		Optional:                    false,
 	})
 
 	// API rate limit middleware. The counter is local and not shared between
@@ -275,8 +300,9 @@ func New(options *Options) *API {
 				OAuth2Configs: oauthConfigs,
 				// The code handles the the case where the user is not
 				// authenticated automatically.
-				RedirectToLogin: false,
-				Optional:        true,
+				RedirectToLogin:             false,
+				DisableSessionExpiryRefresh: options.DeploymentConfig.DisableSessionExpiryRefresh.Value,
+				Optional:                    true,
 			}),
 			httpmw.ExtractUserParam(api.Database, false),
 			httpmw.ExtractWorkspaceAndAgentParam(api.Database),
@@ -302,8 +328,9 @@ func New(options *Options) *API {
 				// Optional is true to allow for public apps. If an
 				// authorization check fails and the user is not authenticated,
 				// they will be redirected to the login page by the app handler.
-				RedirectToLogin: false,
-				Optional:        true,
+				RedirectToLogin:             false,
+				DisableSessionExpiryRefresh: options.DeploymentConfig.DisableSessionExpiryRefresh.Value,
+				Optional:                    true,
 			}),
 			// Redirect to the login page if the user tries to open an app with
 			// "me" as the username and they are not logged in.
@@ -386,16 +413,18 @@ func New(options *Options) *API {
 					httpmw.ExtractOrganizationParam(options.Database),
 				)
 				r.Get("/", api.organization)
-				r.Route("/templateversions", func(r chi.Router) {
-					r.Post("/", api.postTemplateVersionsByOrganization)
-					r.Get("/{templateversionname}", api.templateVersionByOrganizationAndName)
-					r.Get("/{templateversionname}/previous", api.previousTemplateVersionByOrganizationAndName)
-				})
+				r.Post("/templateversions", api.postTemplateVersionsByOrganization)
 				r.Route("/templates", func(r chi.Router) {
 					r.Post("/", api.postTemplateByOrganization)
 					r.Get("/", api.templatesByOrganization)
-					r.Get("/{templatename}", api.templateByOrganizationAndName)
 					r.Get("/examples", api.templateExamples)
+					r.Route("/{templatename}", func(r chi.Router) {
+						r.Get("/", api.templateByOrganizationAndName)
+						r.Route("/versions/{templateversionname}", func(r chi.Router) {
+							r.Get("/", api.templateVersionByOrganizationTemplateAndName)
+							r.Get("/previous", api.previousTemplateVersionByOrganizationTemplateAndName)
+						})
+					})
 				})
 				r.Route("/members", func(r chi.Router) {
 					r.Get("/roles", api.assignableOrgRoles)
@@ -535,12 +564,13 @@ func New(options *Options) *API {
 			r.Route("/me", func(r chi.Router) {
 				r.Use(httpmw.ExtractWorkspaceAgent(options.Database))
 				r.Get("/metadata", api.workspaceAgentMetadata)
-				r.Post("/version", api.postWorkspaceAgentVersion)
+				r.Post("/startup", api.postWorkspaceAgentStartup)
 				r.Post("/app-health", api.postWorkspaceAppHealth)
 				r.Get("/gitauth", api.workspaceAgentsGitAuth)
 				r.Get("/gitsshkey", api.agentGitSSHKey)
 				r.Get("/coordinate", api.workspaceAgentCoordinate)
 				r.Post("/report-stats", api.workspaceAgentReportStats)
+				r.Post("/report-lifecycle", api.workspaceAgentReportLifecycle)
 			})
 			r.Route("/{workspaceagent}", func(r chi.Router) {
 				r.Use(
@@ -612,6 +642,28 @@ func New(options *Options) *API {
 				r.Get("/", api.workspaceApplicationAuth)
 			})
 		})
+		r.Route("/insights", func(r chi.Router) {
+			r.Use(apiKeyMiddleware)
+			r.Get("/daus", api.deploymentDAUs)
+		})
+		r.Route("/debug", func(r chi.Router) {
+			r.Use(
+				apiKeyMiddleware,
+				// Ensure only owners can access debug endpoints.
+				func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+						if !api.Authorize(r, rbac.ActionRead, rbac.ResourceDebugInfo) {
+							httpapi.ResourceNotFound(rw)
+							return
+						}
+
+						next.ServeHTTP(rw, r)
+					})
+				},
+			)
+
+			r.Get("/coordinator", api.debugCoordinator)
+		})
 	})
 
 	if options.SwaggerEndpoint {
@@ -628,6 +680,11 @@ func New(options *Options) *API {
 }
 
 type API struct {
+	// ctx is canceled immediately on shutdown, it can be used to abort
+	// interruptible tasks.
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	*Options
 	// ID is a uniquely generated ID on initialization.
 	// This is used to associate objects with a specific
@@ -638,7 +695,8 @@ type API struct {
 	WorkspaceClientCoordinateOverride atomic.Pointer[func(rw http.ResponseWriter) bool]
 	TailnetCoordinator                atomic.Pointer[tailnet.Coordinator]
 	QuotaCommitter                    atomic.Pointer[proto.QuotaCommitter]
-	HTTPAuth                          *HTTPAuthorizer
+
+	HTTPAuth *HTTPAuthorizer
 
 	// APIHandler serves "/api/v2"
 	APIHandler chi.Router
@@ -661,6 +719,8 @@ type API struct {
 
 // Close waits for all WebSocket connections to drain before returning.
 func (api *API) Close() error {
+	api.cancel()
+
 	api.WebsocketWaitMutex.Lock()
 	api.WebsocketWaitGroup.Wait()
 	api.WebsocketWaitMutex.Unlock()

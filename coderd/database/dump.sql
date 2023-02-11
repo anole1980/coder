@@ -16,7 +16,9 @@ CREATE TYPE audit_action AS ENUM (
     'write',
     'delete',
     'start',
-    'stop'
+    'stop',
+    'login',
+    'logout'
 );
 
 CREATE TYPE build_reason AS ENUM (
@@ -97,6 +99,14 @@ CREATE TYPE resource_type AS ENUM (
 CREATE TYPE user_status AS ENUM (
     'active',
     'suspended'
+);
+
+CREATE TYPE workspace_agent_lifecycle_state AS ENUM (
+    'created',
+    'starting',
+    'start_timeout',
+    'start_error',
+    'ready'
 );
 
 CREATE TYPE workspace_app_health AS ENUM (
@@ -342,7 +352,10 @@ CREATE TABLE template_version_parameters (
     options jsonb DEFAULT '[]'::jsonb NOT NULL,
     validation_regex text NOT NULL,
     validation_min integer NOT NULL,
-    validation_max integer NOT NULL
+    validation_max integer NOT NULL,
+    validation_error text DEFAULT ''::text NOT NULL,
+    validation_monotonic text DEFAULT ''::text NOT NULL,
+    CONSTRAINT validation_monotonic_order CHECK ((validation_monotonic = ANY (ARRAY['increasing'::text, 'decreasing'::text, ''::text])))
 );
 
 COMMENT ON COLUMN template_version_parameters.name IS 'Parameter name';
@@ -364,6 +377,10 @@ COMMENT ON COLUMN template_version_parameters.validation_regex IS 'Validation: r
 COMMENT ON COLUMN template_version_parameters.validation_min IS 'Validation: minimum length of value';
 
 COMMENT ON COLUMN template_version_parameters.validation_max IS 'Validation: maximum length of value';
+
+COMMENT ON COLUMN template_version_parameters.validation_error IS 'Validation: error displayed when the regex does not match.';
+
+COMMENT ON COLUMN template_version_parameters.validation_monotonic IS 'Validation: consecutive values preserve the monotonic order';
 
 CREATE TABLE template_versions (
     id uuid NOT NULL,
@@ -448,7 +465,11 @@ CREATE TABLE workspace_agents (
     last_connected_replica_id uuid,
     connection_timeout_seconds integer DEFAULT 0 NOT NULL,
     troubleshooting_url text DEFAULT ''::text NOT NULL,
-    motd_file text DEFAULT ''::text NOT NULL
+    motd_file text DEFAULT ''::text NOT NULL,
+    lifecycle_state workspace_agent_lifecycle_state DEFAULT 'created'::workspace_agent_lifecycle_state NOT NULL,
+    login_before_ready boolean DEFAULT true NOT NULL,
+    startup_script_timeout_seconds integer DEFAULT 0 NOT NULL,
+    expanded_directory character varying(4096) DEFAULT ''::character varying NOT NULL
 );
 
 COMMENT ON COLUMN workspace_agents.version IS 'Version tracks the version of the currently running workspace agent. Workspace agents register their version upon start.';
@@ -458,6 +479,14 @@ COMMENT ON COLUMN workspace_agents.connection_timeout_seconds IS 'Connection tim
 COMMENT ON COLUMN workspace_agents.troubleshooting_url IS 'URL for troubleshooting the agent.';
 
 COMMENT ON COLUMN workspace_agents.motd_file IS 'Path to file inside workspace containing the message of the day (MOTD) to show to the user when logging in via SSH.';
+
+COMMENT ON COLUMN workspace_agents.lifecycle_state IS 'The current lifecycle state reported by the workspace agent.';
+
+COMMENT ON COLUMN workspace_agents.login_before_ready IS 'If true, the agent will not prevent login before it is ready (e.g. startup script is still executing).';
+
+COMMENT ON COLUMN workspace_agents.startup_script_timeout_seconds IS 'The number of seconds to wait for the startup script to complete. If the script does not complete within this time, the agent lifecycle will be marked as start_timeout.';
+
+COMMENT ON COLUMN workspace_agents.expanded_directory IS 'The resolved path of a user-specified directory. e.g. ~/coder -> /home/coder/coder';
 
 CREATE TABLE workspace_apps (
     id uuid NOT NULL,

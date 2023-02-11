@@ -15,7 +15,7 @@ The CLI and the server are the same binary. We did this to encourage virality so
 individuals can start their own Coder deployments.
 
 From your local machine, download the CLI for your operating system from the
-[releases](https://github.com/coder/coder/releases) or run:
+[releases](https://github.com/coder/coder/releases/latest) or run:
 
 ```console
 curl -fsSL https://coder.com/install.sh | sh
@@ -160,12 +160,15 @@ resource "coder_agent" "coder" {
   startup_script = <<EOT
 #!/bin/bash
 
-# install code-server 4.8.3
-curl -fsSL https://code-server.dev/install.sh | sh -s -- --version 4.8.3
+# Install code-server 4.8.3 under /tmp/code-server using the "standalone" installation
+# that does not require root permissions. Note that /tmp may be mounted in tmpfs which
+# can lead to increased RAM usage. To avoid this, you can pre-install code-server inside
+# the Docker image or VM image.
+curl -fsSL https://code-server.dev/install.sh | sh -s -- --method=standalone --prefix=/tmp/code-server --version 4.8.3
 
-# The & prevents the startup_script from blocking so the
-# next commands can run.
-code-server --auth none --port &
+# The & prevents the startup_script from blocking so the next commands can run.
+# The stdout and stderr of code-server is redirected to /tmp/code-server.log.
+/tmp/code-server/bin/code-server --auth none --port 13337 >/tmp/code-server.log 2>&1 &
 
 # var.repo and var.dotfiles_uri is specified
 # elsewhere in the Terraform code as input
@@ -375,24 +378,60 @@ customize them however you like.
 ## Troubleshooting templates
 
 Occasionally, you may run into scenarios where a workspace is created, but the
-agent is not connected. This means the agent or [init script](https://github.com/coder/coder/tree/main/provisionersdk/scripts)
+agent is either not connected or the [startup script](https://registry.terraform.io/providers/coder/coder/latest/docs/resources/agent#startup_script)
+has failed or timed out.
+
+### Agent connection issues
+
+If the agent is not connected, it means the agent or [init script](https://github.com/coder/coder/tree/main/provisionersdk/scripts)
 has failed on the resource.
 
 ```console
 $ coder ssh myworkspace
-Waiting for [agent] to connect...
+⢄⡱ Waiting for connection from [agent]...
 ```
 
 While troubleshooting steps vary by resource, here are some general best
 practices:
 
-- Ensure the resource has `curl` installed
+- Ensure the resource has `curl` installed (alternatively, `wget` or `busybox`)
 - Ensure the resource can `curl` your Coder [access
   URL](./admin/configure.md#access-url)
 - Manually connect to the resource and check the agent logs (e.g., `kubectl exec`, `docker exec` or AWS console)
-  - The Coder agent logs are typically stored in `/var/log/coder-agent.log`
+  - The Coder agent logs are typically stored in `/tmp/coder-agent.log`
   - The Coder agent startup script logs are typically stored in
-    `/var/log/coder-startup-script.log`
+    `/tmp/coder-startup-script.log`
+
+### Agent does not become ready
+
+If the agent does not become ready, it means the [startup script](https://registry.terraform.io/providers/coder/coder/latest/docs/resources/agent#startup_script) is still running or has exited with a non-zero status. This also means the [login before ready](https://registry.terraform.io/providers/coder/coder/latest/docs/resources/agent#login_before_ready) option hasn't been set to true.
+
+```console
+$ coder ssh myworkspace
+⢄⡱ Waiting for [agent] to become ready...
+```
+
+To troubleshoot readiness issues, check the agent logs as suggested above. You can connect to the workspace using `coder ssh` with the `--no-wait` flag. Please note that while this makes login possible, the workspace may be in an incomplete state.
+
+```console
+$ coder ssh myworkspace --no-wait
+
+ > The workspace is taking longer than expected to get
+   ready, the agent startup script is still executing.
+   See troubleshooting instructions at: [...]
+
+user@myworkspace $
+```
+
+If the startup script is expected to take a long time, you can try raising the timeout defined in the template:
+
+```tf
+resource "coder_agent" "main" {
+  # ...
+  login_before_ready = false
+  startup_script_timeout  = 1800 # 30 minutes in seconds.
+}
+```
 
 ## Template permissions (enterprise)
 

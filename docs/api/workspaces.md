@@ -7,18 +7,46 @@
 ```shell
 # Example request using curl
 curl -X POST http://coder-server:8080/api/v2/organizations/{organization}/members/{user}/workspaces \
+  -H 'Content-Type: application/json' \
   -H 'Accept: application/json' \
   -H 'Coder-Session-Token: API_KEY'
 ```
 
 `POST /organizations/{organization}/members/{user}/workspaces`
 
+> Body parameter
+
+```json
+{
+  "autostart_schedule": "string",
+  "name": "string",
+  "parameter_values": [
+    {
+      "copy_from_parameter": "000e07d6-021d-446c-be14-48a9c20bca0b",
+      "destination_scheme": "none",
+      "name": "string",
+      "source_scheme": "none",
+      "source_value": "string"
+    }
+  ],
+  "rich_parameter_values": [
+    {
+      "name": "string",
+      "value": "string"
+    }
+  ],
+  "template_id": "c6d67e98-83ea-49f0-8812-e4abae2b68bc",
+  "ttl_ms": 0
+}
+```
+
 ### Parameters
 
-| Name           | In   | Type         | Required | Description           |
-| -------------- | ---- | ------------ | -------- | --------------------- |
-| `organization` | path | string(uuid) | true     | Organization ID       |
-| `user`         | path | string       | true     | Username, UUID, or me |
+| Name           | In   | Type                                                                         | Required | Description              |
+| -------------- | ---- | ---------------------------------------------------------------------------- | -------- | ------------------------ |
+| `organization` | path | string(uuid)                                                                 | true     | Organization ID          |
+| `user`         | path | string                                                                       | true     | Username, UUID, or me    |
+| `body`         | body | [codersdk.CreateWorkspaceRequest](schemas.md#codersdkcreateworkspacerequest) | true     | Create workspace request |
 
 ### Example responses
 
@@ -86,6 +114,7 @@ curl -X POST http://coder-server:8080/api/v2/organizations/{organization}/member
               "property1": "string",
               "property2": "string"
             },
+            "expanded_directory": "string",
             "first_connected_at": "2019-08-24T14:15:22Z",
             "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
             "instance_id": "string",
@@ -100,10 +129,13 @@ curl -X POST http://coder-server:8080/api/v2/organizations/{organization}/member
                 "preferred": true
               }
             },
+            "lifecycle_state": "created",
+            "login_before_ready": true,
             "name": "string",
             "operating_system": "string",
             "resource_id": "4d5215ed-38bb-48ed-879a-fdb9ca58522f",
             "startup_script": "string",
+            "startup_script_timeout_seconds": 0,
             "status": "connecting",
             "troubleshooting_url": "string",
             "updated_at": "2019-08-24T14:15:22Z",
@@ -247,6 +279,7 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/workspace/{workspacenam
               "property1": "string",
               "property2": "string"
             },
+            "expanded_directory": "string",
             "first_connected_at": "2019-08-24T14:15:22Z",
             "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
             "instance_id": "string",
@@ -261,10 +294,13 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/workspace/{workspacenam
                 "preferred": true
               }
             },
+            "lifecycle_state": "created",
+            "login_before_ready": true,
             "name": "string",
             "operating_system": "string",
             "resource_id": "4d5215ed-38bb-48ed-879a-fdb9ca58522f",
             "startup_script": "string",
+            "startup_script_timeout_seconds": 0,
             "status": "connecting",
             "troubleshooting_url": "string",
             "updated_at": "2019-08-24T14:15:22Z",
@@ -427,6 +463,7 @@ curl -X GET http://coder-server:8080/api/v2/workspaces \
                   "property1": "string",
                   "property2": "string"
                 },
+                "expanded_directory": "string",
                 "first_connected_at": "2019-08-24T14:15:22Z",
                 "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
                 "instance_id": "string",
@@ -441,10 +478,13 @@ curl -X GET http://coder-server:8080/api/v2/workspaces \
                     "preferred": true
                   }
                 },
+                "lifecycle_state": "created",
+                "login_before_ready": true,
                 "name": "string",
                 "operating_system": "string",
                 "resource_id": "4d5215ed-38bb-48ed-879a-fdb9ca58522f",
                 "startup_script": "string",
+                "startup_script_timeout_seconds": 0,
                 "status": "connecting",
                 "troubleshooting_url": "string",
                 "updated_at": "2019-08-24T14:15:22Z",
@@ -589,6 +629,7 @@ curl -X GET http://coder-server:8080/api/v2/workspaces/{workspace} \
               "property1": "string",
               "property2": "string"
             },
+            "expanded_directory": "string",
             "first_connected_at": "2019-08-24T14:15:22Z",
             "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
             "instance_id": "string",
@@ -603,10 +644,13 @@ curl -X GET http://coder-server:8080/api/v2/workspaces/{workspace} \
                 "preferred": true
               }
             },
+            "lifecycle_state": "created",
+            "login_before_ready": true,
             "name": "string",
             "operating_system": "string",
             "resource_id": "4d5215ed-38bb-48ed-879a-fdb9ca58522f",
             "startup_script": "string",
+            "startup_script_timeout_seconds": 0,
             "status": "connecting",
             "troubleshooting_url": "string",
             "updated_at": "2019-08-24T14:15:22Z",

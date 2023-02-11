@@ -55,7 +55,7 @@ type Parameter struct {
 	ID                uuid.UUID                  `json:"id" table:"id" format:"uuid"`
 	Scope             ParameterScope             `json:"scope" table:"scope" enums:"template,workspace,import_job"`
 	ScopeID           uuid.UUID                  `json:"scope_id" table:"scope id" format:"uuid"`
-	Name              string                     `json:"name" table:"name"`
+	Name              string                     `json:"name" table:"name,default_sort"`
 	SourceScheme      ParameterSourceScheme      `json:"source_scheme" table:"source scheme" validate:"ne=none" enums:"none,data"`
 	DestinationScheme ParameterDestinationScheme `json:"destination_scheme" table:"destination scheme" validate:"ne=none" enums:"none,environment_variable,provisioner_variable"`
 	CreatedAt         time.Time                  `json:"created_at" table:"created at" format:"date-time"`
@@ -110,7 +110,7 @@ func (c *Client) CreateParameter(ctx context.Context, scope ParameterScope, id u
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusCreated {
-		return Parameter{}, readBodyAsError(res)
+		return Parameter{}, ReadBodyAsError(res)
 	}
 
 	var param Parameter
@@ -125,7 +125,7 @@ func (c *Client) DeleteParameter(ctx context.Context, scope ParameterScope, id u
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return readBodyAsError(res)
+		return ReadBodyAsError(res)
 	}
 
 	_, _ = io.Copy(io.Discard, res.Body)
@@ -140,7 +140,7 @@ func (c *Client) Parameters(ctx context.Context, scope ParameterScope, id uuid.U
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, readBodyAsError(res)
+		return nil, ReadBodyAsError(res)
 	}
 
 	var parameters []Parameter

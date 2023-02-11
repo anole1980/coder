@@ -23,6 +23,7 @@ export interface AgentRowProps {
   hideSSHButton?: boolean
   hideVSCodeDesktopButton?: boolean
   serverVersion: string
+  onUpdateAgent: () => void
 }
 
 export const AgentRow: FC<AgentRowProps> = ({
@@ -33,6 +34,7 @@ export const AgentRow: FC<AgentRowProps> = ({
   hideSSHButton,
   hideVSCodeDesktopButton,
   serverVersion,
+  onUpdateAgent,
 }) => {
   const styles = useStyles()
   const { t } = useTranslation("agent")
@@ -61,7 +63,11 @@ export const AgentRow: FC<AgentRowProps> = ({
             <span className={styles.agentOS}>{agent.operating_system}</span>
 
             <Maybe condition={agent.status === "connected"}>
-              <AgentVersion agent={agent} serverVersion={serverVersion} />
+              <AgentVersion
+                agent={agent}
+                serverVersion={serverVersion}
+                onUpdate={onUpdateAgent}
+              />
             </Maybe>
 
             <AgentLatency agent={agent} />
@@ -113,6 +119,7 @@ export const AgentRow: FC<AgentRowProps> = ({
                 userName={workspace.owner_name}
                 workspaceName={workspace.name}
                 agentName={agent.name}
+                folderPath={agent.expanded_directory}
               />
             )}
             {applicationsHost !== undefined && applicationsHost !== "" && (

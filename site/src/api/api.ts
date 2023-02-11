@@ -1,7 +1,6 @@
 import axios, { AxiosRequestHeaders } from "axios"
 import dayjs from "dayjs"
 import * as Types from "./types"
-import { WorkspaceBuildTransition } from "./types"
 import * as TypesGen from "./typesGenerated"
 
 export const hardCodedCSRFCookie = (): string => {
@@ -20,8 +19,7 @@ export const hardCodedCSRFCookie = (): string => {
 export const withDefaultFeatures = (
   fs: Partial<TypesGen.Entitlements["features"]>,
 ): TypesGen.Entitlements["features"] => {
-  for (const k in TypesGen.FeatureNames) {
-    const feature = k as TypesGen.FeatureName
+  for (const feature of TypesGen.FeatureNames) {
     // Skip fields that are already filled.
     if (fs[feature] !== undefined) {
       continue
@@ -140,8 +138,7 @@ export const getTokens = async (): Promise<TypesGen.APIKey[]> => {
 }
 
 export const deleteAPIKey = async (keyId: string): Promise<void> => {
-  const response = await axios.delete("/api/v2/users/me/keys/" + keyId)
-  return response.data
+  await axios.delete("/api/v2/users/me/keys/" + keyId)
 }
 
 export const getUsers = async (
@@ -234,10 +231,11 @@ export const getTemplateVersions = async (
 
 export const getTemplateVersionByName = async (
   organizationId: string,
+  templateName: string,
   versionName: string,
 ): Promise<TypesGen.TemplateVersion> => {
   const response = await axios.get<TypesGen.TemplateVersion>(
-    `/api/v2/organizations/${organizationId}/templateversions/${versionName}`,
+    `/api/v2/organizations/${organizationId}/templates/${templateName}/versions/${versionName}`,
   )
   return response.data
 }
@@ -248,11 +246,12 @@ export type GetPreviousTemplateVersionByNameResponse =
 
 export const getPreviousTemplateVersionByName = async (
   organizationId: string,
+  templateName: string,
   versionName: string,
 ): Promise<GetPreviousTemplateVersionByNameResponse> => {
   try {
     const response = await axios.get<TypesGen.TemplateVersion>(
-      `/api/v2/organizations/${organizationId}/templateversions/${versionName}/previous`,
+      `/api/v2/organizations/${organizationId}/templates/${templateName}/versions/${versionName}/previous`,
     )
     return response.data
   } catch (error) {
@@ -290,12 +289,32 @@ export const getTemplateVersionParameters = async (
   return response.data
 }
 
+export const getTemplateVersionRichParameters = async (
+  versionId: string,
+): Promise<TypesGen.TemplateVersionParameter[]> => {
+  const response = await axios.get(
+    `/api/v2/templateversions/${versionId}/rich-parameters`,
+  )
+  return response.data
+}
+
 export const createTemplate = async (
   organizationId: string,
   data: TypesGen.CreateTemplateRequest,
 ): Promise<TypesGen.Template> => {
   const response = await axios.post(
     `/api/v2/organizations/${organizationId}/templates`,
+    data,
+  )
+  return response.data
+}
+
+export const updateActiveTemplateVersion = async (
+  templateId: string,
+  data: TypesGen.UpdateActiveTemplateVersion,
+): Promise<Types.Message> => {
+  const response = await axios.patch<Types.Message>(
+    `/api/v2/templates/${templateId}/versions`,
     data,
   )
   return response.data
@@ -392,32 +411,44 @@ export const getWorkspaceByOwnerAndName = async (
   return response.data
 }
 
-const postWorkspaceBuild =
-  (transition: WorkspaceBuildTransition) =>
-  async (
-    workspaceId: string,
-    template_version_id?: string,
-  ): Promise<TypesGen.WorkspaceBuild> => {
-    const payload = {
-      transition,
-      template_version_id,
-    }
-    const response = await axios.post(
-      `/api/v2/workspaces/${workspaceId}/builds`,
-      payload,
-    )
-    return response.data
-  }
+export const postWorkspaceBuild = async (
+  workspaceId: string,
+  data: TypesGen.CreateWorkspaceBuildRequest,
+): Promise<TypesGen.WorkspaceBuild> => {
+  const response = await axios.post(
+    `/api/v2/workspaces/${workspaceId}/builds`,
+    data,
+  )
+  return response.data
+}
 
-export const startWorkspace = postWorkspaceBuild("start")
-export const stopWorkspace = postWorkspaceBuild("stop")
-export const deleteWorkspace = postWorkspaceBuild("delete")
+export const startWorkspace = (
+  workspaceId: string,
+  templateVersionID: string,
+) =>
+  postWorkspaceBuild(workspaceId, {
+    transition: "start",
+    template_version_id: templateVersionID,
+  })
+export const stopWorkspace = (workspaceId: string) =>
+  postWorkspaceBuild(workspaceId, { transition: "stop" })
+export const deleteWorkspace = (workspaceId: string) =>
+  postWorkspaceBuild(workspaceId, { transition: "delete" })
 
 export const cancelWorkspaceBuild = async (
   workspaceBuildId: TypesGen.WorkspaceBuild["id"],
 ): Promise<Types.Message> => {
   const response = await axios.patch(
     `/api/v2/workspacebuilds/${workspaceBuildId}/cancel`,
+  )
+  return response.data
+}
+
+export const cancelTemplateVersionBuild = async (
+  templateVersionId: TypesGen.TemplateVersion["id"],
+): Promise<Types.Message> => {
+  const response = await axios.patch(
+    `/api/v2/templateversions/${templateVersionId}/cancel`,
   )
   return response.data
 }
@@ -613,8 +644,22 @@ export const putWorkspaceExtension = async (
 }
 
 export const getEntitlements = async (): Promise<TypesGen.Entitlements> => {
-  const response = await axios.get("/api/v2/entitlements")
-  return response.data
+  try {
+    const response = await axios.get("/api/v2/entitlements")
+    return response.data
+  } catch (ex) {
+    if (axios.isAxiosError(ex) && ex.response?.status === 404) {
+      return {
+        errors: [],
+        experimental: false,
+        features: withDefaultFeatures({}),
+        has_license: false,
+        trial: false,
+        warnings: [],
+      }
+    }
+    throw ex
+  }
 }
 
 export const getExperiments = async (): Promise<TypesGen.Experiment[]> => {
@@ -644,6 +689,12 @@ export const getTemplateDAUs = async (
   return response.data
 }
 
+export const getDeploymentDAUs =
+  async (): Promise<TypesGen.DeploymentDAUsResponse> => {
+    const response = await axios.get(`/api/v2/insights/daus`)
+    return response.data
+  }
+
 export const getTemplateACL = async (
   templateId: string,
 ): Promise<TypesGen.TemplateACL> => {
@@ -663,7 +714,7 @@ export const updateTemplateACL = async (
 }
 
 export const getApplicationsHost =
-  async (): Promise<TypesGen.GetAppHostResponse> => {
+  async (): Promise<TypesGen.AppHostResponse> => {
     const response = await axios.get(`/api/v2/applications/host`)
     return response.data
   }
@@ -714,7 +765,7 @@ export const getWorkspaceQuota = async (
 
 export const getAgentListeningPorts = async (
   agentID: string,
-): Promise<TypesGen.ListeningPortsResponse> => {
+): Promise<TypesGen.WorkspaceAgentListeningPortsResponse> => {
   const response = await axios.get(
     `/api/v2/workspaceagents/${agentID}/listening-ports`,
   )
@@ -740,8 +791,20 @@ export const getFile = async (fileId: string): Promise<ArrayBuffer> => {
 }
 
 export const getAppearance = async (): Promise<TypesGen.AppearanceConfig> => {
-  const response = await axios.get(`/api/v2/appearance`)
-  return response.data
+  try {
+    const response = await axios.get(`/api/v2/appearance`)
+    return response.data || {}
+  } catch (ex) {
+    if (axios.isAxiosError(ex) && ex.response?.status === 404) {
+      return {
+        logo_url: "",
+        service_banner: {
+          enabled: false,
+        },
+      }
+    }
+    throw ex
+  }
 }
 
 export const updateAppearance = async (
@@ -776,6 +839,22 @@ export const getTemplateVersionLogs = async (
 ): Promise<TypesGen.ProvisionerJobLog[]> => {
   const response = await axios.get<TypesGen.ProvisionerJobLog[]>(
     `/api/v2/templateversions/${versionId}/logs`,
+  )
+  return response.data
+}
+
+export const updateWorkspaceVersion = async (
+  workspace: TypesGen.Workspace,
+): Promise<TypesGen.WorkspaceBuild> => {
+  const template = await getTemplate(workspace.template_id)
+  return startWorkspace(workspace.id, template.active_version_id)
+}
+
+export const getWorkspaceBuildParameters = async (
+  workspaceBuildId: TypesGen.WorkspaceBuild["id"],
+): Promise<TypesGen.WorkspaceBuildParameter[]> => {
+  const response = await axios.get<TypesGen.WorkspaceBuildParameter[]>(
+    `/api/v2/workspacebuilds/${workspaceBuildId}/parameters`,
   )
   return response.data
 }

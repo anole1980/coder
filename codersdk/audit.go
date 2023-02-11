@@ -14,7 +14,6 @@ import (
 type ResourceType string
 
 const (
-	ResourceTypeOrganization    ResourceType = "organization"
 	ResourceTypeTemplate        ResourceType = "template"
 	ResourceTypeTemplateVersion ResourceType = "template_version"
 	ResourceTypeUser            ResourceType = "user"
@@ -27,8 +26,6 @@ const (
 
 func (r ResourceType) FriendlyString() string {
 	switch r {
-	case ResourceTypeOrganization:
-		return "organization"
 	case ResourceTypeTemplate:
 		return "template"
 	case ResourceTypeTemplateVersion:
@@ -60,9 +57,11 @@ const (
 	AuditActionDelete AuditAction = "delete"
 	AuditActionStart  AuditAction = "start"
 	AuditActionStop   AuditAction = "stop"
+	AuditActionLogin  AuditAction = "login"
+	AuditActionLogout AuditAction = "logout"
 )
 
-func (a AuditAction) FriendlyString() string {
+func (a AuditAction) Friendly() string {
 	switch a {
 	case AuditActionCreate:
 		return "created"
@@ -74,6 +73,10 @@ func (a AuditAction) FriendlyString() string {
 		return "started"
 	case AuditActionStop:
 		return "stopped"
+	case AuditActionLogin:
+		return "logged in"
+	case AuditActionLogout:
+		return "logged out"
 	default:
 		return "unknown"
 	}
@@ -121,10 +124,12 @@ type AuditLogResponse struct {
 }
 
 type CreateTestAuditLogRequest struct {
-	Action       AuditAction  `json:"action,omitempty" enums:"create,write,delete,start,stop"`
-	ResourceType ResourceType `json:"resource_type,omitempty" enums:"organization,template,template_version,user,workspace,workspace_build,git_ssh_key,api_key,group"`
-	ResourceID   uuid.UUID    `json:"resource_id,omitempty" format:"uuid"`
-	Time         time.Time    `json:"time,omitempty" format:"date-time"`
+	Action           AuditAction     `json:"action,omitempty" enums:"create,write,delete,start,stop"`
+	ResourceType     ResourceType    `json:"resource_type,omitempty" enums:"template,template_version,user,workspace,workspace_build,git_ssh_key,auditable_group"`
+	ResourceID       uuid.UUID       `json:"resource_id,omitempty" format:"uuid"`
+	AdditionalFields json.RawMessage `json:"additional_fields,omitempty"`
+	Time             time.Time       `json:"time,omitempty" format:"date-time"`
+	BuildReason      BuildReason     `json:"build_reason,omitempty" enums:"autostart,autostop,initiator"`
 }
 
 // AuditLogs retrieves audit logs from the given page.
@@ -144,7 +149,7 @@ func (c *Client) AuditLogs(ctx context.Context, req AuditLogsRequest) (AuditLogR
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return AuditLogResponse{}, readBodyAsError(res)
+		return AuditLogResponse{}, ReadBodyAsError(res)
 	}
 
 	var logRes AuditLogResponse
@@ -156,6 +161,8 @@ func (c *Client) AuditLogs(ctx context.Context, req AuditLogsRequest) (AuditLogR
 	return logRes, nil
 }
 
+// CreateTestAuditLog creates a fake audit log. Only owners of the organization
+// can perform this action. It's used for testing purposes.
 func (c *Client) CreateTestAuditLog(ctx context.Context, req CreateTestAuditLogRequest) error {
 	res, err := c.Request(ctx, http.MethodPost, "/api/v2/audit/testgenerate", req)
 	if err != nil {

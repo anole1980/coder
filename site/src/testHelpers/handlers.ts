@@ -10,6 +10,10 @@ export const handlers = [
     return res(ctx.status(200), ctx.json(M.MockTemplateDAUResponse))
   }),
 
+  rest.get("/api/v2/insights/daus", async (req, res, ctx) => {
+    return res(ctx.status(200), ctx.json(M.MockDeploymentDAUResponse))
+  }),
+
   // build info
   rest.get("/api/v2/buildinfo", async (req, res, ctx) => {
     return res(ctx.status(200), ctx.json(M.MockBuildInfo))
@@ -86,13 +90,13 @@ export const handlers = [
     },
   ),
   rest.get(
-    "api/v2/organizations/:organizationId/templateversions/:templateVersionName",
+    "api/v2/organizations/:organizationId/templates/:templateName/versions/:templateVersionName",
     async (req, res, ctx) => {
       return res(ctx.status(200), ctx.json(M.MockTemplateVersion))
     },
   ),
   rest.get(
-    "api/v2/organizations/:organizationId/templateversions/:templateVersionName/previous",
+    "api/v2/organizations/:organizationId/templates/:templateName/versions/:templateVersionName/previous",
     async (req, res, ctx) => {
       return res(ctx.status(200), ctx.json(M.MockTemplateVersion2))
     },

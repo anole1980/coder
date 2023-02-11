@@ -20,6 +20,7 @@ import (
 
 	"github.com/coder/coder/coderd/database"
 	"github.com/coder/coder/coderd/httpapi"
+	"github.com/coder/coder/coderd/rbac"
 	"github.com/coder/coder/codersdk"
 )
 
@@ -51,11 +52,10 @@ func APIKey(r *http.Request) database.APIKey {
 type userAuthKey struct{}
 
 type Authorization struct {
-	ID       uuid.UUID
+	Actor rbac.Subject
+	// Username is required for logging and human friendly related
+	// identification.
 	Username string
-	Roles    []string
-	Groups   []string
-	Scope    database.APIKeyScope
 }
 
 // UserAuthorizationOptional may return the roles and scope used for
@@ -88,9 +88,10 @@ const (
 )
 
 type ExtractAPIKeyConfig struct {
-	DB              database.Store
-	OAuth2Configs   *OAuth2Configs
-	RedirectToLogin bool
+	DB                          database.Store
+	OAuth2Configs               *OAuth2Configs
+	RedirectToLogin             bool
+	DisableSessionExpiryRefresh bool
 
 	// Optional governs whether the API key is optional. Use this if you want to
 	// allow unauthenticated requests.
@@ -144,7 +145,7 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 			if token == "" {
 				optionalWrite(http.StatusUnauthorized, codersdk.Response{
 					Message: SignedOutErrorMessage,
-					Detail:  fmt.Sprintf("Cookie %q or query parameter must be provided.", codersdk.SessionTokenKey),
+					Detail:  fmt.Sprintf("Cookie %q or query parameter must be provided.", codersdk.SessionTokenCookie),
 				})
 				return
 			}
@@ -266,10 +267,12 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 			}
 			// Only update the ExpiresAt once an hour to prevent database spam.
 			// We extend the ExpiresAt to reduce re-authentication.
-			apiKeyLifetime := time.Duration(key.LifetimeSeconds) * time.Second
-			if key.ExpiresAt.Sub(now) <= apiKeyLifetime-time.Hour {
-				key.ExpiresAt = now.Add(apiKeyLifetime)
-				changed = true
+			if !cfg.DisableSessionExpiryRefresh {
+				apiKeyLifetime := time.Duration(key.LifetimeSeconds) * time.Second
+				if key.ExpiresAt.Sub(now) <= apiKeyLifetime-time.Hour {
+					key.ExpiresAt = now.Add(apiKeyLifetime)
+					changed = true
+				}
 			}
 			if changed {
 				err := cfg.DB.UpdateAPIKeyByID(r.Context(), database.UpdateAPIKeyByIDParams{
@@ -342,11 +345,13 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 
 			ctx = context.WithValue(ctx, apiKeyContextKey{}, key)
 			ctx = context.WithValue(ctx, userAuthKey{}, Authorization{
-				ID:       key.UserID,
 				Username: roles.Username,
-				Roles:    roles.Roles,
-				Scope:    key.Scope,
-				Groups:   roles.Groups,
+				Actor: rbac.Subject{
+					ID:     key.UserID.String(),
+					Roles:  rbac.RoleNames(roles.Roles),
+					Groups: roles.Groups,
+					Scope:  rbac.ScopeName(key.Scope),
+				},
 			})
 
 			next.ServeHTTP(rw, r.WithContext(ctx))
@@ -362,17 +367,17 @@ func ExtractAPIKey(cfg ExtractAPIKeyConfig) func(http.Handler) http.Handler {
 // 4. The coder_session_token query parameter
 // 5. The custom auth header
 func apiTokenFromRequest(r *http.Request) string {
-	cookie, err := r.Cookie(codersdk.SessionTokenKey)
+	cookie, err := r.Cookie(codersdk.SessionTokenCookie)
 	if err == nil && cookie.Value != "" {
 		return cookie.Value
 	}
 
-	urlValue := r.URL.Query().Get(codersdk.SessionTokenKey)
+	urlValue := r.URL.Query().Get(codersdk.SessionTokenCookie)
 	if urlValue != "" {
 		return urlValue
 	}
 
-	headerValue := r.Header.Get(codersdk.SessionCustomHeader)
+	headerValue := r.Header.Get(codersdk.SessionTokenHeader)
 	if headerValue != "" {
 		return headerValue
 	}

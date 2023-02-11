@@ -199,7 +199,7 @@ func (api *API) templateVersionSchema(rw http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Tags Templates
 // @Param templateversion path string true "Template version ID" format(uuid)
-// @Success 200 {array} parameter.ComputedValue
+// @Success 200 {array} codersdk.TemplateVersionParameter
 // @Router /templateversions/{templateversion}/rich-parameters [get]
 func (api *API) templateVersionRichParameters(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -223,7 +223,7 @@ func (api *API) templateVersionRichParameters(rw http.ResponseWriter, r *http.Re
 		})
 		return
 	}
-	dbParameters, err := api.Database.GetTemplateVersionParameters(ctx, templateVersion.ID)
+	dbTemplateVersionParameters, err := api.Database.GetTemplateVersionParameters(ctx, templateVersion.ID)
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error fetching template version parameters.",
@@ -231,19 +231,16 @@ func (api *API) templateVersionRichParameters(rw http.ResponseWriter, r *http.Re
 		})
 		return
 	}
-	params := make([]codersdk.TemplateVersionParameter, 0)
-	for _, dbParameter := range dbParameters {
-		param, err := convertTemplateVersionParameter(dbParameter)
-		if err != nil {
-			httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
-				Message: "Internal error converting template version parameter.",
-				Detail:  err.Error(),
-			})
-			return
-		}
-		params = append(params, param)
+
+	templateVersionParameters, err := convertTemplateVersionParameters(dbTemplateVersionParameters)
+	if err != nil {
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
+			Message: "Internal error converting template version parameter.",
+			Detail:  err.Error(),
+		})
+		return
 	}
-	httpapi.Write(ctx, rw, http.StatusOK, params)
+	httpapi.Write(ctx, rw, http.StatusOK, templateVersionParameters)
 }
 
 // @Summary Get parameters by template version
@@ -766,22 +763,50 @@ func (api *API) templateVersionByName(rw http.ResponseWriter, r *http.Request) {
 	httpapi.Write(ctx, rw, http.StatusOK, convertTemplateVersion(templateVersion, convertProvisionerJob(job), user))
 }
 
-// @Summary Get template version by organization and name
-// @ID get-template-version-by-organization-and-name
+// @Summary Get template version by organization, template, and name
+// @ID get-template-version-by-organization-template-and-name
 // @Security CoderSessionToken
 // @Produce json
 // @Tags Templates
 // @Param organization path string true "Organization ID" format(uuid)
+// @Param templatename path string true "Template name"
 // @Param templateversionname path string true "Template version name"
 // @Success 200 {object} codersdk.TemplateVersion
-// @Router /organizations/{organization}/templateversions/{templateversionname} [get]
-func (api *API) templateVersionByOrganizationAndName(rw http.ResponseWriter, r *http.Request) {
+// @Router /organizations/{organization}/templates/{templatename}/versions/{templateversionname} [get]
+func (api *API) templateVersionByOrganizationTemplateAndName(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	organization := httpmw.OrganizationParam(r)
-	templateVersionName := chi.URLParam(r, "templateversionname")
-	templateVersion, err := api.Database.GetTemplateVersionByOrganizationAndName(ctx, database.GetTemplateVersionByOrganizationAndNameParams{
+	templateName := chi.URLParam(r, "templatename")
+
+	template, err := api.Database.GetTemplateByOrganizationAndName(ctx, database.GetTemplateByOrganizationAndNameParams{
 		OrganizationID: organization.ID,
-		Name:           templateVersionName,
+		Name:           templateName,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			httpapi.ResourceNotFound(rw)
+			return
+		}
+
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
+			Message: "Internal error fetching template.",
+			Detail:  err.Error(),
+		})
+		return
+	}
+
+	if !api.Authorize(r, rbac.ActionRead, template) {
+		httpapi.ResourceNotFound(rw)
+		return
+	}
+
+	templateVersionName := chi.URLParam(r, "templateversionname")
+	templateVersion, err := api.Database.GetTemplateVersionByTemplateIDAndName(ctx, database.GetTemplateVersionByTemplateIDAndNameParams{
+		TemplateID: uuid.NullUUID{
+			UUID:  template.ID,
+			Valid: true,
+		},
+		Name: templateVersionName,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		httpapi.Write(ctx, rw, http.StatusNotFound, codersdk.Response{
@@ -817,22 +842,49 @@ func (api *API) templateVersionByOrganizationAndName(rw http.ResponseWriter, r *
 	httpapi.Write(ctx, rw, http.StatusOK, convertTemplateVersion(templateVersion, convertProvisionerJob(job), user))
 }
 
-// @Summary Get previous template version by organization and name
-// @ID get-previous-template-version-by-organization-and-name
+// @Summary Get previous template version by organization, template, and name
+// @ID get-previous-template-version-by-organization-template-and-name
 // @Security CoderSessionToken
 // @Produce json
 // @Tags Templates
 // @Param organization path string true "Organization ID" format(uuid)
+// @Param templatename path string true "Template name"
 // @Param templateversionname path string true "Template version name"
 // @Success 200 {object} codersdk.TemplateVersion
-// @Router /organizations/{organization}/templateversions/{templateversionname}/previous [get]
-func (api *API) previousTemplateVersionByOrganizationAndName(rw http.ResponseWriter, r *http.Request) {
+// @Router /organizations/{organization}/templates/{templatename}/versions/{templateversionname}/previous [get]
+func (api *API) previousTemplateVersionByOrganizationTemplateAndName(rw http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	organization := httpmw.OrganizationParam(r)
-	templateVersionName := chi.URLParam(r, "templateversionname")
-	templateVersion, err := api.Database.GetTemplateVersionByOrganizationAndName(ctx, database.GetTemplateVersionByOrganizationAndNameParams{
+	templateName := chi.URLParam(r, "templatename")
+	template, err := api.Database.GetTemplateByOrganizationAndName(ctx, database.GetTemplateByOrganizationAndNameParams{
 		OrganizationID: organization.ID,
-		Name:           templateVersionName,
+		Name:           templateName,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			httpapi.ResourceNotFound(rw)
+			return
+		}
+
+		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
+			Message: "Internal error fetching template.",
+			Detail:  err.Error(),
+		})
+		return
+	}
+
+	if !api.Authorize(r, rbac.ActionRead, template) {
+		httpapi.ResourceNotFound(rw)
+		return
+	}
+
+	templateVersionName := chi.URLParam(r, "templateversionname")
+	templateVersion, err := api.Database.GetTemplateVersionByTemplateIDAndName(ctx, database.GetTemplateVersionByTemplateIDAndNameParams{
+		TemplateID: uuid.NullUUID{
+			UUID:  template.ID,
+			Valid: true,
+		},
+		Name: templateVersionName,
 	})
 	if err != nil {
 		if xerrors.Is(err, sql.ErrNoRows) {
@@ -1379,6 +1431,18 @@ func convertTemplateVersion(version database.TemplateVersion, job codersdk.Provi
 	}
 }
 
+func convertTemplateVersionParameters(dbParams []database.TemplateVersionParameter) ([]codersdk.TemplateVersionParameter, error) {
+	params := make([]codersdk.TemplateVersionParameter, 0)
+	for _, dbParameter := range dbParams {
+		param, err := convertTemplateVersionParameter(dbParameter)
+		if err != nil {
+			return nil, err
+		}
+		params = append(params, param)
+	}
+	return params, nil
+}
+
 func convertTemplateVersionParameter(param database.TemplateVersionParameter) (codersdk.TemplateVersionParameter, error) {
 	var protoOptions []*sdkproto.RichParameterOption
 	err := json.Unmarshal(param.Options, &protoOptions)
@@ -1394,17 +1458,25 @@ func convertTemplateVersionParameter(param database.TemplateVersionParameter) (c
 			Icon:        option.Icon,
 		})
 	}
+
+	descriptionPlaintext, err := parameter.Plaintext(param.Description)
+	if err != nil {
+		return codersdk.TemplateVersionParameter{}, err
+	}
 	return codersdk.TemplateVersionParameter{
-		Name:            param.Name,
-		Description:     param.Description,
-		Type:            param.Type,
-		Mutable:         param.Mutable,
-		DefaultValue:    param.DefaultValue,
-		Icon:            param.Icon,
-		Options:         options,
-		ValidationRegex: param.ValidationRegex,
-		ValidationMin:   param.ValidationMin,
-		ValidationMax:   param.ValidationMax,
+		Name:                 param.Name,
+		Description:          param.Description,
+		DescriptionPlaintext: descriptionPlaintext,
+		Type:                 param.Type,
+		Mutable:              param.Mutable,
+		DefaultValue:         param.DefaultValue,
+		Icon:                 param.Icon,
+		Options:              options,
+		ValidationRegex:      param.ValidationRegex,
+		ValidationMin:        param.ValidationMin,
+		ValidationMax:        param.ValidationMax,
+		ValidationError:      param.ValidationError,
+		ValidationMonotonic:  codersdk.ValidationMonotonicOrder(param.ValidationMonotonic),
 	}, nil
 }
 

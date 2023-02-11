@@ -3,6 +3,10 @@ import {
   MockWorkspace,
   MockWorkspaceAgent,
   MockWorkspaceAgentConnecting,
+  MockWorkspaceAgentOutdated,
+  MockWorkspaceAgentStartError,
+  MockWorkspaceAgentStarting,
+  MockWorkspaceAgentStartTimeout,
   MockWorkspaceAgentTimeout,
   MockWorkspaceApp,
 } from "testHelpers/entities"
@@ -86,10 +90,43 @@ Timeout.args = {
   showApps: true,
 }
 
+export const Starting = Template.bind({})
+Starting.args = {
+  agent: MockWorkspaceAgentStarting,
+  workspace: MockWorkspace,
+  applicationsHost: "",
+  showApps: true,
+}
+
+export const StartTimeout = Template.bind({})
+StartTimeout.args = {
+  agent: MockWorkspaceAgentStartTimeout,
+  workspace: MockWorkspace,
+  applicationsHost: "",
+  showApps: true,
+}
+
+export const StartError = Template.bind({})
+StartError.args = {
+  agent: MockWorkspaceAgentStartError,
+  workspace: MockWorkspace,
+  applicationsHost: "",
+  showApps: true,
+}
+
 export const ShowingPortForward = Template.bind({})
 ShowingPortForward.args = {
   agent: MockWorkspaceAgent,
   workspace: MockWorkspace,
   applicationsHost: "https://coder.com",
   showApps: true,
+}
+
+export const Outdated = Template.bind({})
+Outdated.args = {
+  agent: MockWorkspaceAgentOutdated,
+  workspace: MockWorkspace,
+  applicationsHost: "",
+  showApps: true,
+  serverVersion: "v99.999.9999+c1cdf14",
 }
